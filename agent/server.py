@@ -160,6 +160,23 @@ async def _configure_git_identity(sandbox_backend: SandboxBackendProtocol) -> No
     )
 
 
+async def _configure_sandbox_github_auth(
+    sandbox_backend: SandboxBackendProtocol, github_token: str
+) -> None:
+    """Expose GitHub auth to non-LangSmith sandbox backends.
+
+    LangSmith uses a proxy and `GH_TOKEN=dummy gh`. Self-hosted providers do not
+    have that proxy, so the prompt uses OPEN_SWE_GITHUB_TOKEN and the backend
+    must expose it to shell commands.
+    """
+    if os.getenv("SANDBOX_TYPE", "langsmith") == "langsmith":
+        return
+    env = getattr(sandbox_backend, "_env", None)
+    if isinstance(env, dict):
+        env["OPEN_SWE_GITHUB_TOKEN"] = github_token
+        env["GH_TOKEN"] = github_token
+
+
 async def _recreate_sandbox(thread_id: str) -> SandboxBackendProtocol:
     """Recreate a sandbox after a connection failure.
 
@@ -347,9 +364,10 @@ async def get_agent(config: RunnableConfig) -> Pregel:
     triggering_user_identity = await asyncio.to_thread(
         resolve_triggering_user_identity, config, github_token
     )
-    del github_token
 
     sandbox_backend = await ensure_sandbox_for_thread(thread_id)
+    await _configure_sandbox_github_auth(sandbox_backend, github_token)
+    del github_token
 
     linear_issue = config["configurable"].get("linear_issue", {})
     linear_project_id = linear_issue.get("linear_project_id", "")

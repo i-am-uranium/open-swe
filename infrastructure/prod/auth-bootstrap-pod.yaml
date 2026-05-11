@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: open-swe-auth-bootstrap
+  namespace: open-swe-prod
+  labels:
+    app.kubernetes.io/name: open-swe
+    app.kubernetes.io/component: auth-bootstrap
+spec:
+  restartPolicy: Never
+  serviceAccountName: open-swe
+  automountServiceAccountToken: false
+  securityContext:
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: shell
+      image: ghcr.io/your-org/open-swe:self-host-runtime
+      imagePullPolicy: IfNotPresent
+      workingDir: /app
+      command:
+        - sleep
+      args:
+        - "86400"
+      envFrom:
+        - configMapRef:
+            name: open-swe-config
+      volumeMounts:
+        - name: state
+          mountPath: /home/openswe
+          subPath: home
+        - name: state
+          mountPath: /workspace/open-swe
+          subPath: workspace
+  volumes:
+    - name: state
+      persistentVolumeClaim:
+        claimName: open-swe-state

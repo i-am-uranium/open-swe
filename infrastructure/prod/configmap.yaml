@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: open-swe-config
+  namespace: open-swe-prod
+  labels:
+    app.kubernetes.io/name: open-swe
+    app.kubernetes.io/component: controller
+data:
+  OPEN_SWE_RUNTIME: "oss"
+  OPEN_SWE_AGENT_BACKEND: "codex_cli"
+  OPEN_SWE_GITHUB_AUTH_MODE: "github_app"
+  SANDBOX_TYPE: "local"
+  LOCAL_SANDBOX_ROOT_DIR: "/workspace/open-swe/work"
+  HOME: "/home/openswe"
+  CODEX_HOME: "/home/openswe/.codex"
+  OPEN_SWE_CLI_TIMEOUT_SECONDS: "7200"
+  OPEN_SWE_CLI_MAX_TURNS: "100"
+  PORT: "8000"
+  DEFAULT_REPO_OWNER: ""
+  DEFAULT_REPO_NAME: ""
+  ALLOWED_GITHUB_ORGS: ""
+  ALLOWED_GITHUB_REPOS: ""
+  SLACK_BOT_USERNAME: "open-swe"
+  SLACK_ASSISTANTS_API_ENABLED: "true"

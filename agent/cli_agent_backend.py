@@ -99,7 +99,6 @@ def build_cli_agent_command(*, backend_name: str, prompt: str, work_dir: str) ->
             f"cd {quoted_work_dir} && {prompt_pipe} | "
             "codex exec "
             "--dangerously-bypass-approvals-and-sandbox "
-            "--ask-for-approval never "
             "--sandbox danger-full-access"
             f"{model_arg} "
             f"--cd {quoted_work_dir} -"

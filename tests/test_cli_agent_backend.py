@@ -17,7 +17,6 @@ def test_codex_cli_command_reads_prompt_from_stdin() -> None:
     assert "printf %s" in command
     assert "codex exec" in command
     assert "--dangerously-bypass-approvals-and-sandbox" in command
-    assert "--ask-for-approval never" in command
     assert "--sandbox danger-full-access" in command
     assert "--cd /workspace/repo" in command
     assert command.endswith(" -")

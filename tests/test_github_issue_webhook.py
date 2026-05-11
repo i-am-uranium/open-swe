@@ -47,11 +47,11 @@ def _sign_slack_body(body: bytes, timestamp: str = "1700000000") -> str:
     return f"v0={sig}"
 
 
-def _post_slack_webhook(client: TestClient, payload: dict) -> object:
+def _post_slack_webhook(client: TestClient, payload: dict, path: str = "/webhooks/slack") -> object:
     body = json.dumps(payload, separators=(",", ":")).encode()
     timestamp = "1700000000"
     return client.post(
-        "/webhooks/slack",
+        path,
         content=body,
         headers={
             "X-Slack-Request-Timestamp": timestamp,
@@ -441,6 +441,24 @@ def test_slack_webhook_routes_review_command_to_reviewer(monkeypatch) -> None:
     assert pr_ref.number == 1244
     assert captured["channel_id"] == "C123"
     assert captured["thread_ts"] == "1700000000.000100"
+
+
+def test_slack_events_alias_routes_to_slack_webhook(monkeypatch) -> None:
+    monkeypatch.setattr(webapp, "SLACK_SIGNING_SECRET", _TEST_SLACK_SECRET)
+    monkeypatch.setattr(slack_utils.time, "time", lambda: 1700000000)
+
+    client = TestClient(webapp.app)
+    response = _post_slack_webhook(
+        client,
+        {
+            "type": "url_verification",
+            "challenge": "slack-challenge-token",
+        },
+        path="/slack/events",
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"challenge": "slack-challenge-token"}
 
 
 def test_slack_webhook_malformed_review_command_does_not_start_agent(monkeypatch) -> None:

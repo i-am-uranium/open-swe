@@ -49,6 +49,8 @@ def is_bot_token_only_mode() -> bool:
     can't resolve per-user GitHub OAuth tokens. In this mode the GitHub App
     installation token is used for all git operations instead.
     """
+    if os.environ.get("OPEN_SWE_GITHUB_AUTH_MODE", "").strip().lower() == "github_app":
+        return True
     return bool(LANGSMITH_API_KEY and not X_SERVICE_AUTH_JWT_SECRET and not USER_ID_API_KEY_MAP)
 
 

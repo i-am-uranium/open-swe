@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: open-swe
+  namespace: open-swe-prod
+  labels:
+    app.kubernetes.io/name: open-swe
+    app.kubernetes.io/component: controller
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: open-swe
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: open-swe
+        app.kubernetes.io/component: controller
+    spec:
+      serviceAccountName: open-swe
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: open-swe
+          image: ghcr.io/your-org/open-swe:self-host-runtime
+          imagePullPolicy: IfNotPresent
+          workingDir: /app
+          command:
+            - uv
+          args:
+            - run
+            - uvicorn
+            - agent.webapp:app
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: open-swe-config
+            - secretRef:
+                name: open-swe-secrets
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          volumeMounts:
+            - name: state
+              mountPath: /home/openswe
+              subPath: home
+            - name: state
+              mountPath: /workspace/open-swe
+              subPath: workspace
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 4
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "6"
+              memory: 12Gi
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: open-swe-state

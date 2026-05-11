@@ -1,0 +1,14 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: open-swe
+  namespace: open-swe-prod
+  labels:
+    app.kubernetes.io/name: open-swe
+    app.kubernetes.io/component: controller
+spec:
+  maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: open-swe
+      app.kubernetes.io/component: controller

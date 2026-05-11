@@ -13,6 +13,12 @@ DEFAULT_PROMPT_PATH = os.environ.get(
 )
 
 
+def _github_cli_prefix() -> str:
+    if os.environ.get("SANDBOX_TYPE", "langsmith") == "langsmith":
+        return "GH_TOKEN=dummy gh"
+    return 'GH_TOKEN="$OPEN_SWE_GITHUB_TOKEN" gh'
+
+
 def _load_default_prompt() -> str:
     """Load custom prompt from the default prompt file.
 
@@ -45,7 +51,7 @@ All code execution and file operations happen in this sandbox environment.
 
 **Important:**
 - Use `{working_dir}` as your working directory for all operations
-- The `gh` CLI is installed and authenticated by a sandbox proxy. Always invoke it as `GH_TOKEN=dummy gh <command>` so the CLI passes its local auth check while the proxy injects the real runtime token.
+- The `gh` CLI is installed and authenticated for this sandbox. Always invoke it as `{github_cli} <command>`.
 - Direct GitHub API calls from the sandbox are also authenticated by the proxy; do not ask the user for a GitHub token.
 - The `execute` tool enforces a 5-minute timeout by default (300 seconds)
 - If a command times out and needs longer, rerun it by explicitly passing `timeout=<seconds>` to the `execute` tool (e.g. `timeout=600` for 10 minutes)
@@ -83,9 +89,9 @@ REPO_SETUP_SECTION = """---
 
 Before starting any task that requires code changes, set up the repository in your sandbox. Follow these steps in order:
 
-1. **Identify the repo** — Use task context to determine the repository. If you need to inspect GitHub, use `GH_TOKEN=dummy gh repo list`, `GH_TOKEN=dummy gh search repos`, or `GH_TOKEN=dummy gh search code`.
+1. **Identify the repo** — Use task context to determine the repository. If you need to inspect GitHub, use `{github_cli} repo list`, `{github_cli} search repos`, or `{github_cli} search code`.
 
-2. **Clone the repo** — Run `cd {working_dir} && GH_TOKEN=dummy gh repo clone <owner>/<repo>`.
+2. **Clone the repo** — Run `cd {working_dir} && {github_cli} repo clone <owner>/<repo>`.
 
 3. **Set the commit identity** — IMMEDIATELY after cloning, `cd` into the repo and run:
 
@@ -123,7 +129,7 @@ TASK_EXECUTION_SECTION = """---
 If you make changes, communicate updates in the source channel:
 - Use `linear_comment` for Linear-triggered tasks.
 - Use `slack_thread_reply` for Slack-triggered tasks.
-- For GitHub-triggered tasks, use `GH_TOKEN=dummy gh issue comment` or `GH_TOKEN=dummy gh pr comment` only after confirming the target issue or pull request.
+- For GitHub-triggered tasks, use `{github_cli} issue comment` or `{github_cli} pr comment` only after confirming the target issue or pull request.
 - If the task was not triggered from a known source (no Slack thread, no Linear ticket, no GitHub issue), skip the notification step.
 
 If a Slack-triggered request is asking you to review a GitHub pull request, do not clone the repo, edit files, commit, push, or open a PR. Call `request_pr_review` once with the GitHub PR URL, then use `slack_thread_reply` to say whether the review was started or why it could not be started, and stop.
@@ -133,15 +139,15 @@ For tasks that require code changes, follow this order:
 1. **Understand** — Read the issue/task carefully. Explore relevant files before making any changes.
 2. **Implement** — Make focused, minimal changes. Do not modify code outside the scope of the task. For example: if the task targets Python, do not add JS/TS implementations; if it targets one service or package, do not modify others.
 3. **Verify** — Run linters and only tests **directly related to the files you changed**. Do NOT run the full test suite — CI handles that. If no related tests exist, skip this step.
-4. **Submit** — Commit, push, and open or update a draft pull request with `GH_TOKEN=dummy gh`.
-5. **Comment** — Call `linear_comment` or `slack_thread_reply` for Linear/Slack. For GitHub-triggered tasks, comment with `GH_TOKEN=dummy gh`.
+4. **Submit** — Commit, push, and open or update a draft pull request with `{github_cli}`.
+5. **Comment** — Call `linear_comment` or `slack_thread_reply` for Linear/Slack. For GitHub-triggered tasks, comment with `{github_cli}`.
 
-**Strict requirement:** Never claim "PR updated/opened" unless `gh` returned success and you have the PR URL from command output or `GH_TOKEN=dummy gh pr view --json url --jq .url`. If push or PR creation fails, state that explicitly.
+**Strict requirement:** Never claim "PR updated/opened" unless `gh` returned success and you have the PR URL from command output or `{github_cli} pr view --json url --jq .url`. If push or PR creation fails, state that explicitly.
 
 For questions or status checks (no code changes needed):
 
 1. **Answer** — Gather the information needed to respond.
-2. **Comment** — Call `linear_comment` or `slack_thread_reply` for Linear/Slack. For GitHub-triggered tasks, use `GH_TOKEN=dummy gh issue comment` or `GH_TOKEN=dummy gh pr comment`. Never leave a question unanswered."""
+2. **Comment** — Call `linear_comment` or `slack_thread_reply` for Linear/Slack. For GitHub-triggered tasks, use `{github_cli} issue comment` or `{github_cli} pr comment`. Never leave a question unanswered."""
 
 
 TOOL_USAGE_SECTION = """---
@@ -156,7 +162,7 @@ Fetches a URL and converts HTML to markdown. Use for web pages. Synthesize the c
 
 #### `http_request`
 Make HTTP requests (GET, POST, PUT, DELETE, etc.) to APIs. Use this for API calls with custom headers, methods, params, or request bodies — not for fetching web pages.
-Do not use this tool for GitHub API calls. Use `GH_TOKEN=dummy gh` in the sandbox for GitHub operations.
+Do not use this tool for GitHub API calls. Use `{github_cli}` in the sandbox for GitHub operations.
 
 #### `linear_comment`
 Posts a comment to a Linear ticket given a `ticket_id`. Call this after opening/updating the pull request to notify stakeholders and include the PR link. You can tag Linear users with `@username` (their Linear display name).
@@ -170,7 +176,7 @@ Format messages using Slack's mrkdwn format, NOT standard Markdown.
     To mention/tag a user, use `<@USER_ID>` (e.g. `<@U06KD8BFY95>`). You can find user IDs in the conversation context next to display names (e.g. `@Name(U06KD8BFY95)`).
 
 #### GitHub via `gh`
-Use `GH_TOKEN=dummy gh <command>` for GitHub operations: repository discovery, cloning, issues, pull requests, reviews, comments, labels, check status, and workflow operations. For local working-tree state, use `git` directly. Never pass a real GitHub token to `gh`."""
+Use `{github_cli} <command>` for GitHub operations: repository discovery, cloning, issues, pull requests, reviews, comments, labels, check status, and workflow operations. For local working-tree state, use `git` directly. Never pass a real GitHub token to `gh`."""
 
 
 TOOL_BEST_PRACTICES_SECTION = """---
@@ -292,7 +298,7 @@ When you have completed your implementation, follow these steps in order:
 
 2. **Review your changes**: Review the diff to ensure correctness. Verify no regressions or unintended modifications.
 
-3. **Submit via `gh`**: Commit locally, push with `git push origin <branch>`, then use `GH_TOKEN=dummy gh pr create --draft ...` or `GH_TOKEN=dummy gh pr edit ...`.
+3. **Submit via `gh`**: Commit locally, push with `git push origin <branch>`, then use `{github_cli} pr create --draft ...` or `{github_cli} pr edit ...`.
    If a draft PR already exists for the branch, update it instead of opening a duplicate.
 
    **PR Title** (under 70 characters):
@@ -322,7 +328,7 @@ When you have completed your implementation, follow these steps in order:
 
 **IMPORTANT: If you made commits directly via `git commit` or `git revert` in the sandbox, you MUST push those commits to GitHub. Never report the work as done without pushing.**
 
-**IMPORTANT: Never claim a PR was created or updated unless `gh` returned success and you have the PR URL from command output or `GH_TOKEN=dummy gh pr view --json url --jq .url`. If there are no changes or any command fails, report that explicitly.**
+**IMPORTANT: Never claim a PR was created or updated unless `gh` returned success and you have the PR URL from command output or `{github_cli} pr view --json url --jq .url`. If there are no changes or any command fails, report that explicitly.**
 
 **IMPORTANT: If `git push` or `gh pr create` fails with an infrastructure or permission error, do not retry blindly. Report the failure and end the task.**
 
@@ -331,7 +337,7 @@ When you have completed your implementation, follow these steps in order:
 4. **Notify the source** immediately after PR creation/update succeeds. Include a brief summary and the PR link:
    - Linear-triggered: use `linear_comment` with an `@mention` of the user who triggered the task
    - Slack-triggered: use `slack_thread_reply`
-   - GitHub-triggered: use `GH_TOKEN=dummy gh issue comment` or `GH_TOKEN=dummy gh pr comment`
+   - GitHub-triggered: use `{github_cli} issue comment` or `{github_cli} pr comment`
    - If the task was not triggered from a known source channel (no Slack thread, no Linear ticket, no GitHub issue context), skip the notification step.
 
    Example:
@@ -409,6 +415,7 @@ def construct_system_prompt(
         working_dir=working_dir,
         linear_project_id=linear_project_id or "<PROJECT_ID>",
         linear_issue_number=linear_issue_number or "<ISSUE_NUMBER>",
+        github_cli=_github_cli_prefix(),
         default_prompt_section=default_prompt_section,
         collaboration_section=_render_collaboration_section(triggering_user_identity),
     )

@@ -82,6 +82,8 @@ from .utils.slack_feedback import (
 
 logger = logging.getLogger(__name__)
 
+_OSS_RUNTIME = None
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -357,6 +359,46 @@ def _run_id_for_logging(run: Any) -> str:
     return run_id if isinstance(run_id, str) and run_id else "<unknown>"
 
 
+def use_oss_runtime() -> bool:
+    return os.environ.get("OPEN_SWE_RUNTIME", "").strip().lower() in {"oss", "standalone"}
+
+
+def get_oss_runtime():
+    global _OSS_RUNTIME
+    if _OSS_RUNTIME is None:
+        from .oss_runtime import OSSRuntime
+
+        _OSS_RUNTIME = OSSRuntime()
+    return _OSS_RUNTIME
+
+
+async def create_agent_run(
+    thread_id: str,
+    graph_id: str,
+    *,
+    input_payload: dict[str, Any],
+    config: dict[str, Any],
+    if_not_exists: str = "create",
+) -> dict[str, Any]:
+    if use_oss_runtime():
+        return await get_oss_runtime().create_run(
+            thread_id,
+            graph_id,
+            input_payload=input_payload,
+            config=config,
+            if_not_exists=if_not_exists,
+        )
+
+    langgraph_client = get_client(url=LANGGRAPH_URL)
+    return await langgraph_client.runs.create(
+        thread_id,
+        graph_id,
+        input=input_payload,
+        config=config,
+        if_not_exists=if_not_exists,
+    )
+
+
 def _is_repo_allowed(repo_config: dict[str, str]) -> bool:
     """Check if the repo is in the allowlist.
 
@@ -444,6 +486,16 @@ async def _upsert_slack_thread_repo_metadata(
     thread_id: str, repo_config: dict[str, str], langgraph_client: LangGraphClient
 ) -> None:
     """Persist the selected repo config on the thread metadata."""
+    if use_oss_runtime():
+        runtime = get_oss_runtime()
+        await runtime.threads.create(
+            thread_id=thread_id,
+            if_exists="do_nothing",
+            metadata={"repo": repo_config},
+        )
+        await runtime.threads.update(thread_id=thread_id, metadata={"repo": repo_config})
+        return
+
     try:
         await langgraph_client.threads.update(thread_id=thread_id, metadata={"repo": repo_config})
     except Exception as exc:  # noqa: BLE001
@@ -503,6 +555,9 @@ async def is_thread_active(thread_id: str) -> bool:
     Returns:
         True if the thread status is "busy", False otherwise
     """
+    if use_oss_runtime():
+        return await get_oss_runtime().is_thread_active(thread_id)
+
     langgraph_client = get_client(url=LANGGRAPH_URL)
     try:
         logger.debug("Fetching thread status for %s from %s", thread_id, LANGGRAPH_URL)
@@ -527,6 +582,9 @@ async def is_thread_active(thread_id: str) -> bool:
 
 async def _thread_exists(thread_id: str) -> bool:
     """Return whether a LangGraph thread already exists."""
+    if use_oss_runtime():
+        return await get_oss_runtime().thread_exists(thread_id)
+
     langgraph_client = get_client(url=LANGGRAPH_URL)
     try:
         await langgraph_client.threads.get(thread_id)
@@ -565,6 +623,9 @@ async def queue_message_for_thread(
     Returns:
         True if successfully queued, False otherwise
     """
+    if use_oss_runtime():
+        return await get_oss_runtime().queue_message(thread_id, message_content)
+
     langgraph_client = get_client(url=LANGGRAPH_URL)
     try:
         namespace = ("queue", thread_id)
@@ -806,11 +867,10 @@ async def process_linear_issue(  # noqa: PLR0912, PLR0915
             logger.error("Failed to queue message for thread %s", thread_id)
     else:
         logger.info("Creating LangGraph run for thread %s", thread_id)
-        langgraph_client = get_client(url=LANGGRAPH_URL)
-        await langgraph_client.runs.create(
+        await create_agent_run(
             thread_id,
             "agent",
-            input={"messages": [{"role": "user", "content": content_blocks}]},
+            input_payload={"messages": [{"role": "user", "content": content_blocks}]},
             config={"configurable": configurable, "metadata": _AGENT_VERSION_METADATA},
             if_not_exists="create",
         )
@@ -972,10 +1032,10 @@ async def process_slack_mention(event_data: dict[str, Any], repo_config: dict[st
         return
 
     logger.info("Creating Slack LangGraph run for thread %s", thread_id)
-    run = await langgraph_client.runs.create(
+    run = await create_agent_run(
         thread_id,
         "agent",
-        input={"messages": [{"role": "user", "content": content_blocks}]},
+        input_payload={"messages": [{"role": "user", "content": content_blocks}]},
         config={"configurable": configurable, "metadata": _AGENT_VERSION_METADATA},
         if_not_exists="create",
     )
@@ -1333,6 +1393,39 @@ async def slack_webhook_verify() -> dict[str, str]:
 async def health_check() -> dict[str, str]:
     """Health check endpoint."""
     return {"status": "healthy"}
+
+
+@app.post("/oss/runs")
+async def oss_run(request: Request) -> dict[str, Any]:
+    """Direct OSS runtime entrypoint for self-hosted deployments."""
+    if not use_oss_runtime():
+        raise HTTPException(status_code=404, detail="OSS runtime is disabled")
+
+    payload = await request.json()
+    message = payload.get("message")
+    repo = payload.get("repo")
+    if not isinstance(message, str) or not message.strip():
+        raise HTTPException(status_code=400, detail="message is required")
+    if not isinstance(repo, dict) or not repo.get("owner") or not repo.get("name"):
+        raise HTTPException(status_code=400, detail="repo.owner and repo.name are required")
+
+    thread_id = payload.get("thread_id")
+    if not isinstance(thread_id, str) or not thread_id.strip():
+        thread_id = str(uuid.uuid4())
+
+    configurable = {
+        "repo": {"owner": str(repo["owner"]), "name": str(repo["name"])},
+        "source": "oss",
+        "user_email": payload.get("user_email"),
+    }
+    run = await create_agent_run(
+        thread_id,
+        "agent",
+        input_payload={"messages": [{"role": "user", "content": message}]},
+        config={"configurable": configurable, "metadata": _AGENT_VERSION_METADATA},
+        if_not_exists="create",
+    )
+    return run
 
 
 _SUPPORTED_GH_EVENTS = frozenset(

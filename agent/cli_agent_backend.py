@@ -163,5 +163,7 @@ async def run_cli_agent_backend(
         "output": response.output,
     }
     if response.exit_code != 0:
-        raise RuntimeError(f"{backend_name} failed with exit code {response.exit_code}: {response.output}")
+        raise RuntimeError(
+            f"{backend_name} failed with exit code {response.exit_code}: {response.output}"
+        )
     return result

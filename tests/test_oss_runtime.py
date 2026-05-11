@@ -7,7 +7,9 @@ from fastapi.testclient import TestClient
 
 
 @pytest.mark.asyncio
-async def test_oss_runtime_runs_agent_without_langgraph_server(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_oss_runtime_runs_agent_without_langgraph_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from agent.oss_runtime import OSSRuntime
 
     captured: dict[str, object] = {}

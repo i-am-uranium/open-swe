@@ -22,7 +22,9 @@ async def test_github_app_auth_mode_does_not_require_langsmith(
 
     monkeypatch.setenv("OPEN_SWE_GITHUB_AUTH_MODE", "github_app")
     monkeypatch.delenv("LANGSMITH_API_KEY_PROD", raising=False)
-    monkeypatch.setattr(auth, "get_github_app_installation_token_with_expiry", fake_installation_token)
+    monkeypatch.setattr(
+        auth, "get_github_app_installation_token_with_expiry", fake_installation_token
+    )
     monkeypatch.setattr(auth, "persist_encrypted_github_token", fake_persist)
 
     token, encrypted, expires_at = await auth.resolve_github_token(

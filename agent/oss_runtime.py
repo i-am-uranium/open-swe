@@ -150,7 +150,9 @@ class OSSRuntime:
         if_not_exists: str = "create",
     ) -> dict[str, Any]:
         if graph_id != "agent":
-            raise ValueError(f"OSS runtime currently supports only the agent graph, got: {graph_id}")
+            raise ValueError(
+                f"OSS runtime currently supports only the agent graph, got: {graph_id}"
+            )
 
         if not await self.thread_exists(thread_id):
             await self.threads.create(thread_id=thread_id, if_exists="do_nothing")

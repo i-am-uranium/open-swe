@@ -1,10 +1,12 @@
-FROM python:3.14.0-slim-trixie
+FROM python:3.13-slim-trixie
 
 ARG DOCKER_CLI_VERSION=5:29.1.5-1~debian.13~trixie
 ARG NODEJS_VERSION=22.22.0-1nodesource1
 ARG UV_VERSION=0.9.26
 ARG YARN_VERSION=4.12.0
 ARG GH_VERSION=2.83.1
+ARG CODEX_VERSION=0.130.0
+ARG CLAUDE_CODE_VERSION=2.1.139
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -64,7 +66,9 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y "nodejs=${NODEJS_VERSION}" \
     && rm -rf /var/lib/apt/lists/* \
     && corepack enable \
-    && corepack prepare "yarn@${YARN_VERSION}" --activate
+    && corepack prepare "yarn@${YARN_VERSION}" --activate \
+    && npm install -g "@openai/codex@${CODEX_VERSION}" \
+    && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
 ENV GO_VERSION=1.23.5
 
@@ -74,14 +78,23 @@ ENV PATH=/usr/local/go/bin:/root/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/
 ENV GOPATH=/root/go
 ENV PATH=/root/go/bin:/usr/local/go/bin:/root/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-WORKDIR /workspace
+WORKDIR /app
+
+COPY . /app
+
+RUN uv sync --locked --no-dev
 
 RUN echo "=== Installed versions ===" \
     && python --version \
     && uv --version \
     && node --version \
     && yarn --version \
+    && codex --version \
+    && claude --version \
     && go version \
     && docker --version \
     && git --version \
-    && gh --version
+    && gh --version \
+    && uv run python -m uvicorn --version
+
+CMD ["uv", "run", "python", "-m", "uvicorn", "agent.webapp:app", "--host", "0.0.0.0", "--port", "8000"]

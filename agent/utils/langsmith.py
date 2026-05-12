@@ -30,6 +30,16 @@ def get_langsmith_trace_url(thread_id: str) -> str | None:
     try:
         project_url = _compose_langsmith_project_url()
         return f"{project_url}/t/{thread_id}"
+    except ValueError as exc:
+        if "must be set" in str(exc):
+            logger.debug(
+                "LangSmith trace URL is disabled because project env vars are not configured"
+            )
+            return None
+        logger.warning(
+            "Failed to build LangSmith trace URL for thread %s", thread_id, exc_info=True
+        )
+        return None
     except Exception:  # noqa: BLE001
         logger.warning(
             "Failed to build LangSmith trace URL for thread %s", thread_id, exc_info=True

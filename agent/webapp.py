@@ -81,6 +81,9 @@ from .utils.slack_feedback import (
 )
 
 logger = logging.getLogger(__name__)
+logging.getLogger("agent").setLevel(
+    getattr(logging, os.environ.get("OPEN_SWE_LOG_LEVEL", "INFO").upper(), logging.INFO)
+)
 
 _OSS_RUNTIME = None
 

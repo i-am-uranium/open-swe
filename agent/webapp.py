@@ -2309,21 +2309,37 @@ async def process_github_pr_comment(payload: dict[str, Any], event_type: str) ->
         stable_key = f"{owner}/{name}/pr/{pr_number}"
         thread_id = str(uuid.uuid5(uuid.NAMESPACE_URL, stable_key))
         logger.info("Generated thread_id %s for non-open-swe branch '%s'", thread_id, branch_name)
-        langgraph_client = get_client(url=LANGGRAPH_URL)
         try:
-            await langgraph_client.threads.update(thread_id, metadata={"branch_name": branch_name})
-        except Exception as exc:  # noqa: BLE001
-            if _is_not_found_error(exc):
-                await langgraph_client.threads.create(
+            if use_oss_runtime():
+                runtime = get_oss_runtime()
+                await runtime.threads.create(
                     thread_id=thread_id,
                     if_exists="do_nothing",
                     metadata={"branch_name": branch_name},
                 )
+                await runtime.threads.update(
+                    thread_id=thread_id, metadata={"branch_name": branch_name}
+                )
             else:
-                logger.warning("Failed to persist branch_name metadata for thread %s", thread_id)
+                langgraph_client = get_client(url=LANGGRAPH_URL)
+                try:
+                    await langgraph_client.threads.update(
+                        thread_id, metadata={"branch_name": branch_name}
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    if _is_not_found_error(exc):
+                        await langgraph_client.threads.create(
+                            thread_id=thread_id,
+                            if_exists="do_nothing",
+                            metadata={"branch_name": branch_name},
+                        )
+                    else:
+                        raise
+        except Exception:
+            logger.warning("Failed to persist branch_name metadata for thread %s", thread_id)
 
     email = GITHUB_USER_EMAIL_MAP.get(github_login, "")
-    if not email:
+    if not email and not is_bot_token_only_mode():
         logger.warning("No email mapping for GitHub user '%s', skipping", github_login)
         return
 
@@ -2418,7 +2434,7 @@ async def process_github_issue(payload: dict[str, Any], event_type: str) -> None
         return
 
     email = GITHUB_USER_EMAIL_MAP.get(github_login, "")
-    if not email:
+    if not email and not is_bot_token_only_mode():
         logger.warning("No email mapping for GitHub user '%s', skipping", github_login)
         return
 

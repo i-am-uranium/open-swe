@@ -1257,6 +1257,127 @@ def test_process_github_pr_review_command_uses_payload_pr(monkeypatch) -> None:
     assert captured.get("reacted") is True
 
 
+def test_process_github_pr_comment_uses_bot_token_mode_without_email_mapping(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_extract_pr_context(
+        payload: dict[str, object], event_type: str
+    ) -> tuple[dict[str, str], int, str, str, str, int, str | None]:
+        return (
+            {"owner": "clinikk", "name": "subscription-service"},
+            120,
+            "feature/pype-webhook",
+            "clkravi",
+            "https://github.com/clinikk/subscription-service/pull/120",
+            1234,
+            None,
+        )
+
+    async def fake_get_or_resolve_thread_github_token(thread_id: str, email: str) -> str | None:
+        captured["thread_id"] = thread_id
+        captured["email"] = email
+        return "app-token"
+
+    async def fake_react_to_github_comment(
+        repo_config: dict[str, str],
+        comment_id: int,
+        *,
+        event_type: str,
+        token: str,
+        pull_number: int | None = None,
+        node_id: str | None = None,
+    ) -> bool:
+        captured["reaction_token"] = token
+        captured["comment_id"] = comment_id
+        return True
+
+    async def fake_fetch_pr_comments_since_last_tag(
+        repo_config: dict[str, str], pr_number: int, *, token: str
+    ) -> list[dict[str, object]]:
+        captured["fetch_token"] = token
+        return [
+            {
+                "body": "@openswe fix it",
+                "author": "clkravi",
+                "created_at": "2026-05-12T11:43:00Z",
+            }
+        ]
+
+    async def fake_trigger_or_queue_run(*args, **kwargs) -> None:
+        captured["run_thread_id"] = args[0]
+        captured["prompt"] = args[1]
+        captured["github_login"] = kwargs["github_login"]
+        captured["repo_config"] = kwargs["repo_config"]
+        captured["pr_number"] = kwargs["pr_number"]
+
+    class _FakeThreads:
+        async def create(
+            self,
+            thread_id: str,
+            *,
+            if_exists: str = "raise",
+            metadata: dict[str, object] | None = None,
+        ) -> dict[str, object]:
+            captured["metadata_create"] = {
+                "thread_id": thread_id,
+                "if_exists": if_exists,
+                "metadata": metadata,
+            }
+            return {"thread_id": thread_id, "metadata": metadata or {}}
+
+        async def update(
+            self, thread_id: str, *, metadata: dict[str, object] | None = None
+        ) -> dict[str, object]:
+            captured["metadata_update"] = {"thread_id": thread_id, "metadata": metadata}
+            return {"thread_id": thread_id, "metadata": metadata or {}}
+
+    class _FakeRuntime:
+        threads = _FakeThreads()
+
+    def fake_get_client(*args, **kwargs):
+        raise AssertionError("OSS PR comment metadata must not use the LangGraph SDK client")
+
+    monkeypatch.setenv("OPEN_SWE_RUNTIME", "oss")
+    monkeypatch.setenv("OPEN_SWE_GITHUB_AUTH_MODE", "github_app")
+    monkeypatch.setattr(webapp, "GITHUB_USER_EMAIL_MAP", {})
+    monkeypatch.setattr(webapp, "get_oss_runtime", lambda: _FakeRuntime())
+    monkeypatch.setattr(webapp, "get_client", fake_get_client)
+    monkeypatch.setattr(webapp, "extract_pr_context", fake_extract_pr_context)
+    monkeypatch.setattr(
+        webapp, "_get_or_resolve_thread_github_token", fake_get_or_resolve_thread_github_token
+    )
+    monkeypatch.setattr(webapp, "react_to_github_comment", fake_react_to_github_comment)
+    monkeypatch.setattr(
+        webapp, "fetch_pr_comments_since_last_tag", fake_fetch_pr_comments_since_last_tag
+    )
+    monkeypatch.setattr(webapp, "_trigger_or_queue_run", fake_trigger_or_queue_run)
+
+    asyncio.run(
+        webapp.process_github_pr_comment(
+            {"sender": {"login": "clkravi", "id": 1}},
+            "pull_request_review_comment",
+        )
+    )
+
+    assert captured["email"] == ""
+    assert captured["reaction_token"] == "app-token"
+    assert captured["fetch_token"] == "app-token"
+    assert captured["comment_id"] == 1234
+    assert captured["metadata_create"] == {
+        "thread_id": captured["run_thread_id"],
+        "if_exists": "do_nothing",
+        "metadata": {"branch_name": "feature/pype-webhook"},
+    }
+    assert captured["metadata_update"] == {
+        "thread_id": captured["run_thread_id"],
+        "metadata": {"branch_name": "feature/pype-webhook"},
+    }
+    assert captured["github_login"] == "clkravi"
+    assert captured["repo_config"] == {"owner": "clinikk", "name": "subscription-service"}
+    assert captured["pr_number"] == 120
+    assert "@openswe fix it" in str(captured["prompt"])
+
+
 def test_process_github_pr_review_command_uses_url_override(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

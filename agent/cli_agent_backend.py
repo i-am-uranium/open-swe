@@ -9,6 +9,7 @@ import shlex
 from typing import Any
 
 from agent.utils.sandbox_paths import aresolve_sandbox_work_dir
+from agent.utils.worktree import WorktreeInfo, aprepare_cli_worktree
 
 CLI_AGENT_BACKENDS = {"codex_cli", "claude_code"}
 
@@ -19,6 +20,15 @@ def configured_agent_backend() -> str:
 
 def using_cli_agent_backend() -> bool:
     return configured_agent_backend() in CLI_AGENT_BACKENDS
+
+
+def cli_worktrees_enabled() -> bool:
+    return os.getenv("OPEN_SWE_CLI_WORKTREES", "true").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
 
 
 def _message_content_to_text(content: Any) -> str:
@@ -46,6 +56,7 @@ def build_cli_agent_prompt(
     input_payload: dict[str, Any],
     config: dict[str, Any],
     work_dir: str,
+    worktree_info: WorktreeInfo | None = None,
 ) -> str:
     configurable = dict(config.get("configurable") or {})
     repo = configurable.get("repo") or {}
@@ -61,10 +72,28 @@ def build_cli_agent_prompt(
         )
 
     task_text = _extract_task_text(input_payload) or "No task text was provided."
+    worktree_section = ""
+    if worktree_info is not None:
+        pr_context = (
+            f"- Existing PR context: this worktree was based on PR #{worktree_info.pr_number}.\n"
+            if worktree_info.pr_number is not None
+            else ""
+        )
+        worktree_section = f"""
+Prepared workspace:
+- Repository has already been prepared at the working directory above.
+- Branch prepared for this run: {worktree_info.branch}
+- Cached source checkout: {worktree_info.source_dir}
+{pr_context}- Make changes only in this prepared worktree.
+- Stay on the prepared branch unless the user explicitly requested a different branch.
+- Push only the prepared branch. Do not push to the source/default branch or another PR branch.
+"""
+
     return f"""You are running as the Open SWE autonomous coding agent.
 
 Repository: {repo_slug}
 Working directory: {work_dir}
+{worktree_section}
 
 Task:
 {task_text}
@@ -74,11 +103,12 @@ Linear context:
 
 Execution requirements:
 - Inspect the repository and current task context before editing.
-- Clone or fetch the repository if it is not already present in the working directory.
-- Pull the latest default branch before creating a work branch.
+- If a prepared workspace is listed above, do not clone the repository again.
+- If no prepared workspace is listed, clone or fetch the repository if it is not already present in the working directory.
+- Pull the latest default branch before creating a work branch only when no prepared workspace is listed.
 - Never push directly to main or master.
 - Never force push.
-- Create a feature branch for the work.
+- Create or use a feature branch for the work.
 - Make the smallest production-quality change that satisfies the task.
 - Run the relevant tests or checks and include the results in your final response.
 - Commit the change with a clear message.
@@ -144,10 +174,26 @@ async def run_cli_agent_backend(
     del github_token
 
     work_dir = await aresolve_sandbox_work_dir(sandbox_backend)
+    task_text = _extract_task_text(input_payload)
+    worktree_info: WorktreeInfo | None = None
+    configurable = dict(config.get("configurable") or {})
+    repo_config = configurable.get("repo")
+    run_id = str(configurable.get("run_id") or thread_id)
+    if cli_worktrees_enabled() and isinstance(repo_config, dict):
+        worktree_info = await aprepare_cli_worktree(
+            sandbox_backend,
+            base_work_dir=work_dir,
+            repo_config=repo_config,
+            run_id=run_id,
+            task_text=task_text,
+        )
+        work_dir = worktree_info.path
+
     prompt = build_cli_agent_prompt(
         input_payload=input_payload,
         config=config,
         work_dir=work_dir,
+        worktree_info=worktree_info,
     )
     command = build_cli_agent_command(
         backend_name=backend_name,

@@ -175,6 +175,7 @@ class OSSRuntime:
         runnable_config = dict(config or {})
         configurable = dict(runnable_config.get("configurable") or {})
         configurable["thread_id"] = thread_id
+        configurable["run_id"] = run_id
         configurable["__is_for_execution__"] = True
         runnable_config["configurable"] = configurable
         runnable_config["metadata"] = {

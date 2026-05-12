@@ -3,6 +3,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 import pytest
+from deepagents.backends.protocol import ExecuteResponse
 
 
 def test_codex_cli_command_reads_prompt_from_stdin() -> None:
@@ -80,3 +81,88 @@ async def test_oss_runtime_dispatches_cli_backend_when_configured(
     assert run["status"] == "completed"
     assert run["result"] == {"exit_code": 0, "output": "created PR"}
     cli_runner.assert_awaited_once()
+    cli_config = cli_runner.await_args.kwargs["config"]
+    assert cli_config["configurable"]["run_id"] == run["run_id"]
+
+
+@pytest.mark.asyncio
+async def test_cli_backend_runs_inside_prepared_worktree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent.cli_agent_backend import run_cli_agent_backend
+    from agent.utils.worktree import WorktreeInfo
+
+    captured: dict[str, object] = {}
+
+    class FakeSandbox:
+        def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+            captured["command"] = command
+            captured["timeout"] = timeout
+            return ExecuteResponse(output="ok", exit_code=0, truncated=False)
+
+    async def fake_prepare_worktree(
+        sandbox_backend: object,
+        *,
+        base_work_dir: str,
+        repo_config: dict[str, str],
+        run_id: str,
+        task_text: str,
+    ) -> WorktreeInfo:
+        captured["sandbox_backend"] = sandbox_backend
+        captured["base_work_dir"] = base_work_dir
+        captured["repo_config"] = repo_config
+        captured["run_id"] = run_id
+        captured["task_text"] = task_text
+        return WorktreeInfo(
+            path="/workspace/open-swe/work/worktrees/run-1/subscription-service",
+            branch="open-swe/subscription-service-run-1",
+            source_dir="/workspace/open-swe/work/repos/clinikk__subscription-service",
+            pr_number=119,
+        )
+
+    fake_sandbox = FakeSandbox()
+    monkeypatch.setenv("OPEN_SWE_AGENT_BACKEND", "codex_cli")
+    monkeypatch.setattr(
+        "agent.utils.auth.resolve_github_token",
+        AsyncMock(return_value=("token", "encrypted", "expires")),
+    )
+    monkeypatch.setattr(
+        "agent.server.ensure_sandbox_for_thread", AsyncMock(return_value=fake_sandbox)
+    )
+    monkeypatch.setattr("agent.server._configure_sandbox_github_auth", AsyncMock())
+    monkeypatch.setattr(
+        "agent.cli_agent_backend.aresolve_sandbox_work_dir",
+        AsyncMock(return_value="/workspace/open-swe/work"),
+    )
+    monkeypatch.setattr(
+        "agent.cli_agent_backend.aprepare_cli_worktree",
+        fake_prepare_worktree,
+        raising=False,
+    )
+
+    result = await run_cli_agent_backend(
+        thread_id="thread-1",
+        input_payload={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Revise https://github.com/clinikk/subscription-service/pull/119",
+                }
+            ]
+        },
+        config={
+            "configurable": {
+                "run_id": "run-1",
+                "repo": {"owner": "clinikk", "name": "subscription-service"},
+            }
+        },
+    )
+
+    assert result["exit_code"] == 0
+    assert captured["base_work_dir"] == "/workspace/open-swe/work"
+    assert captured["repo_config"] == {"owner": "clinikk", "name": "subscription-service"}
+    assert captured["run_id"] == "run-1"
+    assert "subscription-service/pull/119" in str(captured["task_text"])
+    command = str(captured["command"])
+    assert "--cd /workspace/open-swe/work/worktrees/run-1/subscription-service" in command
+    assert "Branch prepared for this run: open-swe/subscription-service-run-1" in command

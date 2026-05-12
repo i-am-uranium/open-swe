@@ -1251,6 +1251,7 @@ async def linear_webhook_verify() -> dict[str, str]:
     return {"status": "ok", "message": "Linear webhook endpoint is active"}
 
 
+@app.post("/slack/events")
 @app.post("/webhooks/slack")
 async def slack_webhook(request: Request, background_tasks: BackgroundTasks) -> dict[str, str]:
     """Handle Slack Event API webhooks for app mentions."""
@@ -1383,6 +1384,7 @@ async def slack_webhook(request: Request, background_tasks: BackgroundTasks) -> 
     return {"status": "accepted", "message": "Slack mention queued"}
 
 
+@app.get("/slack/events")
 @app.get("/webhooks/slack")
 async def slack_webhook_verify() -> dict[str, str]:
     """Verify endpoint for Slack webhook setup."""

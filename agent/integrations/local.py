@@ -52,6 +52,7 @@ def create_local_sandbox(sandbox_id: str | None = None):
         LocalShellBackend instance implementing SandboxBackendProtocol.
     """
     root_dir = os.getenv("LOCAL_SANDBOX_ROOT_DIR", os.getcwd())
+    os.makedirs(root_dir, exist_ok=True)
 
     return GuardedLocalShellBackend(
         root_dir=root_dir,

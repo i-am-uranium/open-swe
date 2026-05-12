@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from cryptography.fernet import Fernet
 
 
 @pytest.mark.asyncio
@@ -65,3 +66,45 @@ def test_prompt_uses_dummy_github_token_for_langsmith_sandbox(
     prompt = construct_system_prompt(working_dir="/workspace")
 
     assert "GH_TOKEN=dummy gh" in prompt
+
+
+@pytest.mark.asyncio
+async def test_persist_encrypted_github_token_uses_oss_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent import webapp
+    from agent.utils import auth
+
+    captured: dict[str, object] = {}
+
+    class FakeThreads:
+        async def update(self, thread_id: str, *, metadata: dict) -> dict:
+            captured["thread_id"] = thread_id
+            captured["metadata"] = metadata
+            return {"thread_id": thread_id, "metadata": metadata}
+
+    class FakeRuntime:
+        threads = FakeThreads()
+
+    class FailingClient:
+        class threads:
+            @staticmethod
+            async def update(*_args, **_kwargs) -> None:
+                raise AssertionError("OSS mode must not use the LangGraph SDK client")
+
+    monkeypatch.setenv("OPEN_SWE_RUNTIME", "oss")
+    monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(webapp, "get_oss_runtime", lambda: FakeRuntime())
+    monkeypatch.setattr(auth, "client", FailingClient())
+
+    encrypted = await auth.persist_encrypted_github_token(
+        "thread-1",
+        "ghs_installation",
+        expires_at="2026-05-11T08:00:00Z",
+    )
+
+    assert encrypted
+    assert captured["thread_id"] == "thread-1"
+    metadata = captured["metadata"]
+    assert metadata["github_token_encrypted"] == encrypted
+    assert metadata["github_token_expires_at"] == "2026-05-11T08:00:00Z"

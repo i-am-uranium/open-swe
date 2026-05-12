@@ -16,12 +16,17 @@ from langchain_core.messages.content import create_text_block
 from langgraph_sdk import get_client
 from langgraph_sdk.client import LangGraphClient
 
+from .job_queue import create_job_queue, get_redis_url
 from .reviewer_findings import (
     REVIEWER_THREAD_KIND,
     ReviewerPRMeta,
     ReviewerSlackThread,
     set_reviewer_thread_metadata,
 )
+from .storage.database import get_database_url, iter_session
+from .storage.jobs import create_job, get_job_with_runs
+from .storage.jobs import list_jobs as list_durable_jobs
+from .storage.schemas import serialize_job
 from .utils.auth import (
     is_bot_token_only_mode,
     persist_encrypted_github_token,
@@ -366,6 +371,14 @@ def use_oss_runtime() -> bool:
     return os.environ.get("OPEN_SWE_RUNTIME", "").strip().lower() in {"oss", "standalone"}
 
 
+def durable_workers_enabled() -> bool:
+    return os.environ.get("OPEN_SWE_DURABLE_WORKERS_ENABLED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
 def get_oss_runtime():
     global _OSS_RUNTIME
     if _OSS_RUNTIME is None:
@@ -408,6 +421,44 @@ async def list_agent_runs(thread_id: str, *, limit: int | None = None) -> list[d
 
     langgraph_client = get_client(url=LANGGRAPH_URL)
     return await langgraph_client.runs.list(thread_id, limit=limit)
+
+
+async def enqueue_linear_issue_job(issue: dict[str, Any], repo_config: dict[str, str]):
+    if not get_database_url():
+        raise RuntimeError("OPEN_SWE_DATABASE_URL must be set for durable workers")
+    if not get_redis_url():
+        raise RuntimeError("OPEN_SWE_REDIS_URL must be set for durable workers")
+
+    issue_id = str(issue.get("id", ""))
+    triggering_comment_id = str(issue.get("triggering_comment_id", ""))
+    source_id = f"{issue_id}/{triggering_comment_id}" if triggering_comment_id else issue_id
+    payload_json = json.dumps(
+        {
+            "kind": "linear_issue",
+            "issue": issue,
+            "repo_config": repo_config,
+        },
+        sort_keys=True,
+    )
+
+    async for session in iter_session():
+        job = await create_job(
+            session,
+            source="linear",
+            source_id=source_id,
+            repo_owner=repo_config["owner"],
+            repo_name=repo_config["name"],
+            task_text=str(issue.get("title") or issue_id or "Linear issue"),
+            payload_json=payload_json,
+            created_by=(issue.get("comment_author") or {}).get("email"),
+        )
+        break
+    else:
+        raise RuntimeError("Failed to create durable Linear job")
+
+    queue = create_job_queue()
+    await queue.enqueue_job(job.id)
+    return job
 
 
 def _is_repo_allowed(repo_config: dict[str, str]) -> bool:
@@ -608,8 +659,20 @@ async def _thread_exists(thread_id: str) -> bool:
 
 
 async def _ensure_thread_exists_for_metadata(
-    thread_id: str, langgraph_client: LangGraphClient
+    thread_id: str, langgraph_client: LangGraphClient | None = None
 ) -> bool:
+    if use_oss_runtime():
+        try:
+            await get_oss_runtime().threads.create(thread_id=thread_id, if_exists="do_nothing")
+            return True
+        except Exception:
+            logger.exception(
+                "Failed to ensure OSS thread %s exists before metadata update", thread_id
+            )
+            return False
+
+    if langgraph_client is None:
+        langgraph_client = get_client(url=LANGGRAPH_URL)
     try:
         await langgraph_client.threads.create(thread_id=thread_id, if_exists="do_nothing")
         return True
@@ -1247,6 +1310,16 @@ async def linear_webhook(  # noqa: PLR0911, PLR0912, PLR0915
         issue.get("title"),
         issue.get("id"),
     )
+    if durable_workers_enabled():
+        job = await enqueue_linear_issue_job(issue, repo_config)
+        return {
+            "status": "accepted",
+            "message": (
+                f"Queued durable job {job.id} for issue '{issue.get('title')}' "
+                f"and repo {repo_owner}/{repo_name}"
+            ),
+        }
+
     background_tasks.add_task(process_linear_issue, issue, repo_config)
 
     return {
@@ -1438,6 +1511,35 @@ async def oss_run(request: Request) -> dict[str, Any]:
         if_not_exists="create",
     )
     return run
+
+
+@app.get("/oss/jobs")
+async def oss_list_jobs(limit: int = 50) -> dict[str, Any]:
+    """List durable jobs for self-hosted deployments."""
+    if not get_database_url():
+        raise HTTPException(status_code=503, detail="Durable job storage is not configured")
+
+    normalized_limit = max(1, min(limit, 100))
+    async for session in iter_session():
+        jobs = await list_durable_jobs(session, limit=normalized_limit)
+        return {"jobs": [serialize_job(job) for job in jobs]}
+
+    return {"jobs": []}
+
+
+@app.get("/oss/jobs/{job_id}")
+async def oss_get_job(job_id: int) -> dict[str, Any]:
+    """Get one durable job with execution runs."""
+    if not get_database_url():
+        raise HTTPException(status_code=503, detail="Durable job storage is not configured")
+
+    async for session in iter_session():
+        job = await get_job_with_runs(session, job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return serialize_job(job)
+
+    raise HTTPException(status_code=404, detail="Job not found")
 
 
 _SUPPORTED_GH_EVENTS = frozenset(
@@ -1644,8 +1746,7 @@ async def trigger_pr_review_from_ref(
         return {"success": False, "error": "Pull request metadata is missing base/head SHA"}
 
     thread_id = generate_reviewer_thread_id(pr_ref.owner, pr_ref.repo, pr_ref.number)
-    langgraph_client = get_client(url=LANGGRAPH_URL)
-    if not await _ensure_thread_exists_for_metadata(thread_id, langgraph_client):
+    if not await _ensure_thread_exists_for_metadata(thread_id):
         return {"success": False, "error": "Could not create reviewer thread"}
 
     try:
@@ -1695,10 +1796,10 @@ async def trigger_pr_review_from_ref(
         return {"success": queued, "queued": queued, "thread_id": thread_id, "pr_url": pr_url}
 
     logger.info("Creating reviewer run for thread %s from %s PR review request", thread_id, source)
-    await langgraph_client.runs.create(
+    await create_agent_run(
         thread_id,
         "reviewer",
-        input={"messages": [{"role": "user", "content": prompt}]},
+        input_payload={"messages": [{"role": "user", "content": prompt}]},
         config={"configurable": configurable, "metadata": _AGENT_VERSION_METADATA},
         if_not_exists="create",
     )
@@ -1777,8 +1878,7 @@ async def process_github_pr_review_request(payload: dict[str, Any]) -> None:
         logger.warning("No GitHub App token available for PR reviewer request")
         return
 
-    langgraph_client = get_client(url=LANGGRAPH_URL)
-    if not await _ensure_thread_exists_for_metadata(thread_id, langgraph_client):
+    if not await _ensure_thread_exists_for_metadata(thread_id):
         return
 
     try:
@@ -1818,10 +1918,10 @@ async def process_github_pr_review_request(payload: dict[str, Any]) -> None:
         return
 
     logger.info("Creating reviewer run for thread %s from GitHub PR review request", thread_id)
-    await langgraph_client.runs.create(
+    await create_agent_run(
         thread_id,
         "reviewer",
-        input={"messages": [{"role": "user", "content": prompt}]},
+        input_payload={"messages": [{"role": "user", "content": prompt}]},
         config={"configurable": configurable, "metadata": _AGENT_VERSION_METADATA},
         if_not_exists="create",
     )
@@ -1929,6 +2029,17 @@ async def _fetch_open_pr_for_branch(
 
 async def _get_thread_metadata_safe(thread_id: str) -> dict[str, Any] | None:
     """Fetch a thread's metadata; return ``None`` if the thread doesn't exist."""
+    if use_oss_runtime():
+        try:
+            thread = await get_oss_runtime().threads.get(thread_id)
+        except Exception as exc:  # noqa: BLE001
+            if _is_not_found_error(exc):
+                return None
+            logger.warning("Failed to fetch OSS reviewer thread metadata for %s", thread_id)
+            return None
+        metadata = thread.get("metadata") if isinstance(thread, dict) else None
+        return metadata if isinstance(metadata, dict) else {}
+
     langgraph_client = get_client(url=LANGGRAPH_URL)
     try:
         thread = await langgraph_client.threads.get(thread_id)
@@ -2056,8 +2167,7 @@ async def process_github_push_event(payload: dict[str, Any]) -> None:
         logger.info("Push to %s ignored: head_sha unchanged from last_reviewed_sha", head_ref)
         return
 
-    langgraph_client = get_client(url=LANGGRAPH_URL)
-    if not await _ensure_thread_exists_for_metadata(thread_id, langgraph_client):
+    if not await _ensure_thread_exists_for_metadata(thread_id):
         return
     try:
         await persist_encrypted_github_token(thread_id, app_token, expires_at=app_token_expires_at)
@@ -2102,10 +2212,10 @@ async def process_github_push_event(payload: dict[str, Any]) -> None:
         return
 
     logger.info("Creating push re-review run for thread %s", thread_id)
-    await langgraph_client.runs.create(
+    await create_agent_run(
         thread_id,
         "reviewer",
-        input={"messages": [{"role": "user", "content": re_review_prompt}]},
+        input_payload={"messages": [{"role": "user", "content": re_review_prompt}]},
         config={"configurable": configurable, "metadata": _AGENT_VERSION_METADATA},
         if_not_exists="create",
     )

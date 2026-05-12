@@ -20,8 +20,17 @@ async def get_sandbox_id_from_metadata(thread_id: str) -> str | None:
     """Fetch sandbox_id from thread metadata."""
     try:
         config = get_config()
+    except RuntimeError as exc:
+        if "outside of a runnable context" in str(exc):
+            logger.debug(
+                "No runnable config available while resolving sandbox metadata for thread %s",
+                thread_id,
+            )
+            return None
+        logger.warning("Failed to read thread metadata for sandbox", exc_info=True)
+        return None
     except Exception:
-        logger.exception("Failed to read thread metadata for sandbox")
+        logger.warning("Failed to read thread metadata for sandbox", exc_info=True)
         return None
     return config.get("metadata", {}).get("sandbox_id")
 

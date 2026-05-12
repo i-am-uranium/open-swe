@@ -115,7 +115,7 @@ def _build_worktree_setup_command(
     branch: str,
     pr_number: int | None,
 ) -> str:
-    quoted_owner_repo = shlex.quote(f"{owner}/{repo}")
+    quoted_clone_url = shlex.quote(f"https://github.com/{owner}/{repo}.git")
     quoted_source_dir = shlex.quote(source_dir)
     quoted_worktree_dir = shlex.quote(worktree_dir)
     quoted_branch = shlex.quote(branch)
@@ -136,15 +136,25 @@ def _build_worktree_setup_command(
 source_dir={quoted_source_dir}
 worktree_dir={quoted_worktree_dir}
 branch_name={quoted_branch}
+clone_url={quoted_clone_url}
+github_token="${{OPEN_SWE_GITHUB_TOKEN:-${{GH_TOKEN:-}}}}"
+if [ -z "$github_token" ]; then
+  echo "OPEN_SWE_GITHUB_TOKEN or GH_TOKEN is required for git authentication" >&2
+  exit 1
+fi
+git_auth_header="AUTHORIZATION: bearer $github_token"
+export GIT_TERMINAL_PROMPT=0
 mkdir -p {quoted_parent_source} {quoted_parent_worktree}
 if [ ! -d "$source_dir/.git" ]; then
-  GH_TOKEN="${{OPEN_SWE_GITHUB_TOKEN:-${{GH_TOKEN:-}}}}" gh repo clone {quoted_owner_repo} "$source_dir"
+  rm -rf "$source_dir"
+  git -c "http.https://github.com/.extraheader=$git_auth_header" clone "$clone_url" "$source_dir"
+else
+  git -C "$source_dir" remote set-url origin "$clone_url"
 fi
-git_auth_header="AUTHORIZATION: bearer ${{OPEN_SWE_GITHUB_TOKEN:-${{GH_TOKEN:-}}}}"
 git -C "$source_dir" -c "http.https://github.com/.extraheader=$git_auth_header" fetch origin --prune
 default_branch="$(git -C "$source_dir" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)"
 if [ -z "$default_branch" ]; then
-  default_branch="$(git -C "$source_dir" remote show origin | awk '/HEAD branch/ {{print $NF; exit}}' || true)"
+  default_branch="$(git -C "$source_dir" -c "http.https://github.com/.extraheader=$git_auth_header" remote show origin | awk '/HEAD branch/ {{print $NF; exit}}' || true)"
 fi
 if [ -z "$default_branch" ]; then
   default_branch="master"

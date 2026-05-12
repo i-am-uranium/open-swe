@@ -13,6 +13,7 @@ already uses for ``sandbox_id``, ``github_token_encrypted``, etc.
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from typing import Any, Literal, TypedDict, cast
 
@@ -164,6 +165,15 @@ def get_thread_id_from_runtime() -> str:
 
 async def get_thread_metadata(thread_id: str) -> dict[str, Any]:
     """Fetch the current metadata for a thread. Returns ``{}`` on miss."""
+    if _use_oss_runtime():
+        try:
+            thread = await _get_oss_runtime().threads.get(thread_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to fetch OSS thread metadata for %s", thread_id)
+            return {}
+        metadata = thread.get("metadata") if isinstance(thread, dict) else None
+        return metadata if isinstance(metadata, dict) else {}
+
     client = get_client()
     try:
         thread = await client.threads.get(thread_id)
@@ -191,6 +201,12 @@ async def get_finding(thread_id: str, finding_id: str) -> Finding | None:
 
 async def replace_findings(thread_id: str, findings: list[Finding]) -> None:
     """Overwrite the findings list on a thread's metadata."""
+    if _use_oss_runtime():
+        await _get_oss_runtime().threads.update(
+            thread_id=thread_id, metadata={"findings": findings}
+        )
+        return
+
     client = get_client()
     await client.threads.update(thread_id=thread_id, metadata={"findings": findings})
 
@@ -238,7 +254,6 @@ async def set_reviewer_thread_metadata(
     filtering on metadata. Only includes the fields the caller passed in
     (langgraph metadata updates merge rather than overwrite).
     """
-    client = get_client()
     metadata: dict[str, Any] = {"kind": REVIEWER_THREAD_KIND}
     if pr is not None:
         metadata["pr"] = pr
@@ -252,7 +267,22 @@ async def set_reviewer_thread_metadata(
         metadata["slack_thread"] = slack_thread
     if extra:
         metadata.update(extra)
+    if _use_oss_runtime():
+        await _get_oss_runtime().threads.update(thread_id=thread_id, metadata=metadata)
+        return
+
+    client = get_client()
     await client.threads.update(thread_id=thread_id, metadata=metadata)
+
+
+def _use_oss_runtime() -> bool:
+    return os.environ.get("OPEN_SWE_RUNTIME", "").strip().lower() in {"oss", "standalone"}
+
+
+def _get_oss_runtime():
+    from agent import webapp
+
+    return webapp.get_oss_runtime()
 
 
 def get_thread_watch_flag(metadata: dict[str, Any]) -> bool:

@@ -44,7 +44,13 @@ def test_prepare_cli_worktree_uses_unique_path_and_pr_base_ref() -> None:
 
     first_command = backend.commands[0]
     second_command = backend.commands[1]
-    assert "gh repo clone clinikk/subscription-service" in first_command
+    assert "gh repo clone" not in first_command
+    assert "clone_url=https://github.com/clinikk/subscription-service.git" in first_command
+    assert (
+        'git -c "http.https://github.com/.extraheader=$git_auth_header" '
+        'clone "$clone_url" "$source_dir"'
+    ) in first_command
+    assert "OPEN_SWE_GITHUB_TOKEN or GH_TOKEN is required" in first_command
     assert "+pull/119/head:refs/remotes/origin/pr-119" in first_command
     assert "refs/remotes/origin/pr-119" in first_command
     assert "/workspace/open-swe/work/repos/clinikk__subscription-service" in first_command

@@ -149,9 +149,9 @@ class OSSRuntime:
         config: dict[str, Any] | None = None,
         if_not_exists: str = "create",
     ) -> dict[str, Any]:
-        if graph_id != "agent":
+        if graph_id not in {"agent", "reviewer"}:
             raise ValueError(
-                f"OSS runtime currently supports only the agent graph, got: {graph_id}"
+                f"OSS runtime currently supports agent and reviewer graphs, got: {graph_id}"
             )
 
         if not await self.thread_exists(thread_id):
@@ -184,19 +184,22 @@ class OSSRuntime:
         }
 
         try:
-            from agent import cli_agent_backend, server
+            from agent import cli_agent_backend, reviewer, server
             from agent.utils import auth, github_token
 
             server.client = self
             auth.client = self
             github_token.client = self
 
-            if cli_agent_backend.using_cli_agent_backend():
+            if graph_id == "agent" and cli_agent_backend.using_cli_agent_backend():
                 result = await cli_agent_backend.run_cli_agent_backend(
                     thread_id=thread_id,
                     input_payload=input_payload,
                     config=runnable_config,
                 )
+            elif graph_id == "reviewer":
+                agent = await reviewer.get_reviewer_agent(runnable_config)
+                result = await agent.ainvoke(input_payload, config=runnable_config)
             else:
                 agent = await server.get_agent(runnable_config)
                 result = await agent.ainvoke(input_payload, config=runnable_config)

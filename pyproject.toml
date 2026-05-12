@@ -24,6 +24,9 @@ dependencies = [
     "langchain-modal>=0.0.3",
     "langchain-runloop>=0.0.4",
     "exa-py>=2.12.1",
+    "sqlalchemy[asyncio]>=2.0.0",
+    "asyncpg>=0.30.0",
+    "redis>=5.0.0",
 ]
 
 [project.optional-dependencies]
@@ -65,3 +68,8 @@ ignore = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "aiosqlite>=0.20.0",
+]

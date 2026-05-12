@@ -293,8 +293,22 @@ async def persist_encrypted_github_token(
         "github_token_encrypted": encrypted,
         "github_token_expires_at": expires_at,
     }
+    if _use_oss_runtime():
+        await _get_oss_runtime().threads.update(thread_id=thread_id, metadata=metadata)
+        return encrypted
+
     await client.threads.update(thread_id=thread_id, metadata=metadata)
     return encrypted
+
+
+def _use_oss_runtime() -> bool:
+    return os.environ.get("OPEN_SWE_RUNTIME", "").strip().lower() in {"oss", "standalone"}
+
+
+def _get_oss_runtime():
+    from agent import webapp
+
+    return webapp.get_oss_runtime()
 
 
 async def save_encrypted_token_from_email(

@@ -402,6 +402,14 @@ async def create_agent_run(
     )
 
 
+async def list_agent_runs(thread_id: str, *, limit: int | None = None) -> list[dict[str, Any]]:
+    if use_oss_runtime():
+        return await get_oss_runtime().runs.list(thread_id, limit=limit)
+
+    langgraph_client = get_client(url=LANGGRAPH_URL)
+    return await langgraph_client.runs.list(thread_id, limit=limit)
+
+
 def _is_repo_allowed(repo_config: dict[str, str]) -> bool:
     """Check if the repo is in the allowlist.
 
@@ -862,8 +870,7 @@ async def process_linear_issue(  # noqa: PLR0912, PLR0915
 
         if queued:
             logger.info("Message queued for thread %s, will be processed by middleware", thread_id)
-            langgraph_client = get_client(url=LANGGRAPH_URL)
-            runs = await langgraph_client.runs.list(thread_id, limit=1)
+            runs = await list_agent_runs(thread_id, limit=1)
             if runs:
                 await post_linear_trace_comment(issue_id, thread_id, triggering_comment_id)
         else:

@@ -139,3 +139,61 @@ def test_oss_run_endpoint_dispatches_agent_run(monkeypatch: pytest.MonkeyPatch) 
 
     assert response.status_code == 200
     assert response.json() == {"run_id": "run-1", "status": "completed"}
+
+
+@pytest.mark.asyncio
+async def test_linear_queue_path_lists_runs_from_oss_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent import webapp
+
+    trace_comments: list[tuple[str, str, str]] = []
+
+    class FakeRuns:
+        async def list(self, thread_id: str, *, limit: int | None = None) -> list[dict]:
+            assert thread_id == "thread-1"
+            assert limit == 1
+            return [{"run_id": "run-1"}]
+
+    class FakeRuntime:
+        runs = FakeRuns()
+
+    async def fake_fetch_linear_issue_details(issue_id: str) -> dict:
+        assert issue_id == "issue-1"
+        return {
+            "id": "issue-1",
+            "title": "Fix queued follow-up",
+            "description": "No description",
+            "identifier": "CLI-1",
+            "comments": {"nodes": []},
+        }
+
+    async def fake_post_linear_trace_comment(
+        issue_id: str, thread_id: str, triggering_comment_id: str
+    ) -> None:
+        trace_comments.append((issue_id, thread_id, triggering_comment_id))
+
+    def fail_get_client(*args: object, **kwargs: object) -> None:
+        raise AssertionError("OSS queued Linear path must not call LangGraph client")
+
+    monkeypatch.setenv("OPEN_SWE_RUNTIME", "oss")
+    monkeypatch.setattr(webapp, "get_oss_runtime", lambda: FakeRuntime())
+    monkeypatch.setattr(webapp, "generate_thread_id_from_issue", lambda _issue_id: "thread-1")
+    monkeypatch.setattr(webapp, "fetch_linear_issue_details", fake_fetch_linear_issue_details)
+    monkeypatch.setattr(webapp, "is_thread_active", AsyncMock(return_value=True))
+    monkeypatch.setattr(webapp, "queue_message_for_thread", AsyncMock(return_value=True))
+    monkeypatch.setattr(webapp, "post_linear_trace_comment", fake_post_linear_trace_comment)
+    monkeypatch.setattr(webapp, "react_to_linear_comment", AsyncMock())
+    monkeypatch.setattr(webapp, "get_client", fail_get_client)
+
+    await webapp.process_linear_issue(
+        {
+            "id": "issue-1",
+            "triggering_comment": "@openswe follow up",
+            "triggering_comment_id": "comment-1",
+            "comment_author": {"name": "Ravi", "email": "ravi@example.com"},
+        },
+        {"owner": "clinikk", "name": "subscription-service"},
+    )
+
+    assert trace_comments == [("issue-1", "thread-1", "comment-1")]

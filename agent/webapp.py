@@ -60,6 +60,7 @@ from .utils.linear_team_repo_map import LINEAR_TEAM_TO_REPO
 from .utils.multimodal import dedupe_urls, extract_image_urls, fetch_image_block
 from .utils.repo import build_linear_repo_plan, extract_repo_from_text
 from .utils.sandbox import validate_sandbox_startup_config
+from .utils.service_catalog import load_service_catalog
 from .utils.slack import (
     GitHubPrRef,
     add_slack_reaction,
@@ -218,6 +219,10 @@ def get_linear_label_repo_mapping() -> dict[str, dict[str, str]]:
         if repo:
             mapping[str(label).strip().lower()] = repo
     return mapping
+
+
+def get_service_catalog() -> dict[str, Any]:
+    return load_service_catalog()
 
 
 def _coerce_repo_mapping_value(value: Any) -> dict[str, str] | None:
@@ -1384,7 +1389,7 @@ async def linear_webhook(  # noqa: PLR0911, PLR0912, PLR0915
         issue=full_issue,
         fallback_repo=fallback_repo_config,
         default_owner=DEFAULT_REPO_OWNER,
-        label_repo_mapping=get_linear_label_repo_mapping(),
+        service_catalog=get_service_catalog(),
     )
     repo_configs = _repo_configs_from_plan(repo_plan) or [repo_config]
 

@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "repos": [
+    {
+      "name": "subscription-service",
+      "repo": "clinikk/subscription-service",
+      "aliases": [
+        "subscription",
+        "subscription activation",
+        "post payment",
+        "membership card",
+        "ola"
+      ],
+      "linear_labels": [
+        "subscription-service",
+        "subscription",
+        "backend"
+      ]
+    },
+    {
+      "name": "business-portal",
+      "repo": "clinikk/business-portal",
+      "aliases": [
+        "business portal",
+        "dashboard",
+        "frontend"
+      ],
+      "linear_labels": [
+        "business-portal",
+        "frontend",
+        "fe"
+      ]
+    }
+  ],
+  "groups": [
+    {
+      "name": "ola-membership-card",
+      "aliases": [
+        "ola membership card",
+        "ola e-card"
+      ],
+      "repos": [
+        "clinikk/subscription-service",
+        "clinikk/business-portal"
+      ]
+    }
+  ]
+}

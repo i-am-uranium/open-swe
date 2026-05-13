@@ -58,8 +58,9 @@ from .utils.github_user_email_map import GITHUB_USER_EMAIL_MAP
 from .utils.linear import post_linear_trace_comment
 from .utils.linear_team_repo_map import LINEAR_TEAM_TO_REPO
 from .utils.multimodal import dedupe_urls, extract_image_urls, fetch_image_block
-from .utils.repo import extract_repo_from_text
+from .utils.repo import build_linear_repo_plan, extract_repo_from_text
 from .utils.sandbox import validate_sandbox_startup_config
+from .utils.service_catalog import load_service_catalog
 from .utils.slack import (
     GitHubPrRef,
     add_slack_reaction,
@@ -184,6 +185,70 @@ def get_repo_config_from_team_mapping(
     return fallback
 
 
+def get_linear_label_repo_mapping() -> dict[str, dict[str, str]]:
+    """Parse LINEAR_LABEL_TO_REPO into a case-insensitive label repo map.
+
+    Supports JSON:
+      {"frontend": "clinikk/frontend-app", "be": {"owner": "clinikk", "name": "api"}}
+    and comma-separated pairs:
+      frontend=clinikk/frontend-app,be=clinikk/subscription-service
+    """
+    raw = os.environ.get("LINEAR_LABEL_TO_REPO", "").strip()
+    if not raw:
+        return {}
+
+    parsed: dict[str, Any]
+    if raw.startswith("{"):
+        try:
+            loaded = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("Invalid LINEAR_LABEL_TO_REPO JSON; ignoring mapping")
+            return {}
+        parsed = loaded if isinstance(loaded, dict) else {}
+    else:
+        parsed = {}
+        for part in raw.split(","):
+            if "=" not in part:
+                continue
+            label, repo = part.split("=", 1)
+            parsed[label.strip()] = repo.strip()
+
+    mapping: dict[str, dict[str, str]] = {}
+    for label, value in parsed.items():
+        repo = _coerce_repo_mapping_value(value)
+        if repo:
+            mapping[str(label).strip().lower()] = repo
+    return mapping
+
+
+def get_service_catalog() -> dict[str, Any]:
+    return load_service_catalog()
+
+
+def _coerce_repo_mapping_value(value: Any) -> dict[str, str] | None:
+    if isinstance(value, dict):
+        owner = str(value.get("owner") or "").strip()
+        name = str(value.get("name") or "").strip()
+        return {"owner": owner, "name": name} if owner and name else None
+    if isinstance(value, str) and "/" in value:
+        owner, name = value.strip().split("/", 1)
+        owner = owner.strip()
+        name = name.strip()
+        return {"owner": owner, "name": name} if owner and name else None
+    return None
+
+
+def _repo_configs_from_plan(repo_plan: dict[str, Any]) -> list[dict[str, str]]:
+    repos: list[dict[str, str]] = []
+    for entry in repo_plan.get("repos") or []:
+        if not isinstance(entry, dict):
+            continue
+        repo = entry.get("repo")
+        if isinstance(repo, dict) and repo.get("owner") and repo.get("name"):
+            repos.append({"owner": str(repo["owner"]), "name": str(repo["name"])})
+    return repos
+
+
 async def react_to_linear_comment(comment_id: str, emoji: str = "👀") -> bool:
     """Add an emoji reaction to a Linear comment.
 
@@ -257,6 +322,12 @@ async def fetch_linear_issue_details(issue_id: str) -> dict[str, Any] | None:
                 id
                 name
                 key
+            }
+            labels {
+                nodes {
+                    id
+                    name
+                }
             }
             comments {
                 nodes {
@@ -423,20 +494,41 @@ async def list_agent_runs(thread_id: str, *, limit: int | None = None) -> list[d
     return await langgraph_client.runs.list(thread_id, limit=limit)
 
 
-async def enqueue_linear_issue_job(issue: dict[str, Any], repo_config: dict[str, str]):
+async def enqueue_linear_issue_job(
+    issue: dict[str, Any],
+    repo_config: dict[str, str],
+    *,
+    repo_plan: dict[str, Any] | None = None,
+):
     if not get_database_url():
         raise RuntimeError("OPEN_SWE_DATABASE_URL must be set for durable workers")
     if not get_redis_url():
         raise RuntimeError("OPEN_SWE_REDIS_URL must be set for durable workers")
 
     issue_id = str(issue.get("id", ""))
+    identifier = str(issue.get("identifier") or "")
     triggering_comment_id = str(issue.get("triggering_comment_id", ""))
     source_id = f"{issue_id}/{triggering_comment_id}" if triggering_comment_id else issue_id
+    if repo_plan is None:
+        repo_plan = {
+            "mode": "single_repo",
+            "repos": [
+                {
+                    "repo": repo_config,
+                    "source": "fallback",
+                    "reason": "team/project/default mapping",
+                    "execution_order": 0,
+                }
+            ],
+        }
+    repo_configs = _repo_configs_from_plan(repo_plan) or [repo_config]
     payload_json = json.dumps(
         {
             "kind": "linear_issue",
             "issue": issue,
             "repo_config": repo_config,
+            "repo_configs": repo_configs,
+            "repo_plan": repo_plan,
         },
         sort_keys=True,
     )
@@ -450,6 +542,10 @@ async def enqueue_linear_issue_job(issue: dict[str, Any], repo_config: dict[str,
             repo_name=repo_config["name"],
             task_text=str(issue.get("title") or issue_id or "Linear issue"),
             payload_json=payload_json,
+            repo_plan_json=json.dumps(repo_plan, sort_keys=True),
+            coordination_status="planned" if len(repo_configs) > 1 else None,
+            linear_issue_id=issue_id or None,
+            linear_issue_identifier=identifier or None,
             created_by=(issue.get("comment_author") or {}).get("email"),
         )
         break
@@ -752,7 +848,10 @@ async def process_linear_issue(  # noqa: PLR0912, PLR0915
     if triggering_comment_id:
         await react_to_linear_comment(triggering_comment_id, "👀")
 
-    thread_id = generate_thread_id_from_issue(issue_id)
+    is_multi_repo = bool(issue_data.get("multi_repo"))
+    repo_full_name = f"{repo_config.get('owner', '')}/{repo_config.get('name', '')}"
+    thread_seed = f"{issue_id}:{repo_full_name}" if is_multi_repo else issue_id
+    thread_id = generate_thread_id_from_issue(thread_seed)
 
     full_issue = await fetch_linear_issue_details(issue_id)
     if not full_issue:
@@ -875,11 +974,23 @@ async def process_linear_issue(  # noqa: PLR0912, PLR0915
         f"## Title: {title}\n\n"
         f"{triggered_by_line}"
         f"## Linear Ticket: {identifier} - Ticket ID: {issue_id}\n\n"
+        f"## Repository\n{repo_full_name}\n\n"
         f"## Description:\n{description}\n"
         f"{comments_text}\n\n"
         f"Please analyze this issue and implement the necessary changes. "
         f"When you're done, commit and push your changes. {tag_instruction}"
     )
+    if is_multi_repo:
+        repo_index = int(issue_data.get("repo_index") or 0)
+        repo_count = int(issue_data.get("repo_count") or 1)
+        repo_plan = issue_data.get("repo_plan") or {}
+        prompt += (
+            "\n\n## Multi-repository coordination\n"
+            f"This is repository {repo_index + 1} of {repo_count} for the same Linear issue. "
+            "Only make the changes required in this repository. If another repository needs "
+            "follow-up work, mention it in the Linear update instead of editing outside this repo.\n"
+            f"Repo plan: {json.dumps(repo_plan, sort_keys=True)}"
+        )
     content_blocks: list[dict[str, Any]] = [create_text_block(prompt)]
     if image_urls:
         image_urls = dedupe_urls(image_urls)
@@ -910,6 +1021,9 @@ async def process_linear_issue(  # noqa: PLR0912, PLR0915
             "linear_project_id": linear_project_id,
             "linear_issue_number": linear_issue_number,
             "triggering_user_name": user_name or "",
+            "multi_repo": is_multi_repo,
+            "repo_index": int(issue_data.get("repo_index") or 0),
+            "repo_count": int(issue_data.get("repo_count") or 1),
         },
         "user_email": user_email,
         "source": "linear",
@@ -1260,39 +1374,31 @@ async def linear_webhook(  # noqa: PLR0911, PLR0912, PLR0915
         logger.warning("Failed to fetch full issue details, using webhook data")
         full_issue = issue
 
-    repo_config = extract_repo_from_text(comment_body, default_owner=DEFAULT_REPO_OWNER)
+    explicit_repo_config = extract_repo_from_text(comment_body, default_owner=DEFAULT_REPO_OWNER)
+    team = full_issue.get("team", {})
+    team_name = team.get("name", "") if team else ""
+    project = full_issue.get("project")
+    project_name = project.get("name", "") if project else ""
 
-    if repo_config:
-        logger.debug(
-            "Using repo from comment body: %s/%s",
-            repo_config["owner"],
-            repo_config["name"],
-        )
-    else:
-        team = full_issue.get("team", {})
-        team_name = team.get("name", "") if team else ""
-        project = full_issue.get("project")
-        project_name = project.get("name", "") if project else ""
+    team_identifier = team_name.strip() if team_name else ""
+    project_key = project_name.strip() if project_name else ""
+    fallback_repo_config = get_repo_config_from_team_mapping(team_identifier, project_key)
+    repo_config = explicit_repo_config or fallback_repo_config
+    repo_plan = build_linear_repo_plan(
+        comment_body=comment_body,
+        issue=full_issue,
+        fallback_repo=fallback_repo_config,
+        default_owner=DEFAULT_REPO_OWNER,
+        service_catalog=get_service_catalog(),
+    )
+    repo_configs = _repo_configs_from_plan(repo_plan) or [repo_config]
 
-        team_identifier = team_name.strip() if team_name else ""
-        project_key = project_name.strip() if project_name else ""
-
-        repo_config = get_repo_config_from_team_mapping(team_identifier, project_key)
-
-        logger.debug(
-            "Team/project lookup result",
-            extra={
-                "team_name": team_identifier,
-                "project_name": project_key,
-                "repo_config": repo_config,
-            },
-        )
-
-    if not _is_repo_allowed(repo_config):
+    rejected_repo = next((repo for repo in repo_configs if not _is_repo_allowed(repo)), None)
+    if rejected_repo:
         logger.warning(
             "Rejecting Linear webhook: repo '%s/%s' not in allowlist",
-            repo_config.get("owner"),
-            repo_config.get("name"),
+            rejected_repo.get("owner"),
+            rejected_repo.get("name"),
         )
         return {"status": "ignored", "reason": "Repository not in allowlist"}
 
@@ -1311,20 +1417,32 @@ async def linear_webhook(  # noqa: PLR0911, PLR0912, PLR0915
         issue.get("id"),
     )
     if durable_workers_enabled():
-        job = await enqueue_linear_issue_job(issue, repo_config)
+        job = await enqueue_linear_issue_job(issue, repo_config, repo_plan=repo_plan)
         return {
             "status": "accepted",
             "message": (
                 f"Queued durable job {job.id} for issue '{issue.get('title')}' "
-                f"and repo {repo_owner}/{repo_name}"
+                f"and {len(repo_configs)} repo(s)"
             ),
         }
 
-    background_tasks.add_task(process_linear_issue, issue, repo_config)
+    if len(repo_configs) > 1:
+        for index, planned_repo in enumerate(repo_configs):
+            issue_for_repo = dict(issue)
+            issue_for_repo["multi_repo"] = True
+            issue_for_repo["repo_index"] = index
+            issue_for_repo["repo_count"] = len(repo_configs)
+            issue_for_repo["repo_plan"] = repo_plan
+            background_tasks.add_task(process_linear_issue, issue_for_repo, planned_repo)
+    else:
+        background_tasks.add_task(process_linear_issue, issue, repo_config)
 
     return {
         "status": "accepted",
-        "message": f"Processing issue '{issue.get('title')}' for repo {repo_owner}/{repo_name}",
+        "message": (
+            f"Processing issue '{issue.get('title')}' for "
+            f"{len(repo_configs)} repo(s); primary repo {repo_owner}/{repo_name}"
+        ),
     }
 
 

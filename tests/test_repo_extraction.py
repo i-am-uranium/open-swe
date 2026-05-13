@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from agent.utils.repo import extract_repo_from_text
+from agent.utils.repo import (
+    build_linear_repo_plan,
+    extract_repo_from_text,
+    extract_repos_from_text,
+)
 
 
 class TestExtractRepoFromText:
@@ -52,6 +56,192 @@ class TestExtractRepoFromText:
     def test_trailing_slash_stripped(self) -> None:
         result = extract_repo_from_text("repo:my-org/my-repo/")
         assert result == {"owner": "my-org", "name": "my-repo"}
+
+    def test_extract_multiple_repos_from_text(self) -> None:
+        result = extract_repos_from_text(
+            "touch repo:clinikk/subscription-service and "
+            "https://github.com/clinikk/frontend-app plus repo infrastructure",
+            default_owner="clinikk",
+        )
+
+        assert result == [
+            {"owner": "clinikk", "name": "subscription-service"},
+            {"owner": "clinikk", "name": "infrastructure"},
+            {"owner": "clinikk", "name": "frontend-app"},
+        ]
+
+    def test_extract_multiple_repos_dedupes_stably(self) -> None:
+        result = extract_repos_from_text(
+            "repo:clinikk/subscription-service "
+            "https://github.com/clinikk/subscription-service/pull/120",
+            default_owner="clinikk",
+        )
+
+        assert result == [{"owner": "clinikk", "name": "subscription-service"}]
+
+
+class TestBuildLinearRepoPlan:
+    def test_explicit_repos_beat_fallback(self) -> None:
+        plan = build_linear_repo_plan(
+            comment_body="@openswe fix repo:clinikk/subscription-service repo:clinikk/frontend-app",
+            issue={"title": "Fix checkout"},
+            fallback_repo={"owner": "clinikk", "name": "backend"},
+            default_owner="clinikk",
+            label_repo_mapping={},
+        )
+
+        assert [entry["repo"] for entry in plan["repos"]] == [
+            {"owner": "clinikk", "name": "subscription-service"},
+            {"owner": "clinikk", "name": "frontend-app"},
+        ]
+        assert plan["mode"] == "multi_repo"
+
+    def test_linear_labels_add_repos(self) -> None:
+        plan = build_linear_repo_plan(
+            comment_body="@openswe implement",
+            issue={
+                "title": "Update dashboard",
+                "labels": {
+                    "nodes": [
+                        {"name": "subscription-service"},
+                        {"name": "frontend-app"},
+                    ]
+                },
+            },
+            fallback_repo={"owner": "clinikk", "name": "backend"},
+            default_owner="clinikk",
+            label_repo_mapping={
+                "subscription-service": {"owner": "clinikk", "name": "subscription-service"},
+                "frontend-app": {"owner": "clinikk", "name": "frontend-app"},
+            },
+        )
+
+        assert [entry["source"] for entry in plan["repos"]] == ["linear_label", "linear_label"]
+        assert [entry["repo"]["name"] for entry in plan["repos"]] == [
+            "subscription-service",
+            "frontend-app",
+        ]
+
+    def test_service_catalog_labels_add_repos_without_env_mapping(self) -> None:
+        plan = build_linear_repo_plan(
+            comment_body="@openswe implement",
+            issue={
+                "title": "Update dashboard",
+                "labels": {
+                    "nodes": [
+                        {"name": "subscription-service"},
+                        {"name": "frontend"},
+                    ]
+                },
+            },
+            fallback_repo={"owner": "clinikk", "name": "backend"},
+            default_owner="clinikk",
+            service_catalog={
+                "repos": [
+                    {
+                        "repo": "clinikk/subscription-service",
+                        "aliases": ["subscription"],
+                        "linear_labels": ["subscription-service"],
+                    },
+                    {
+                        "repo": "clinikk/frontend-app",
+                        "aliases": ["portal"],
+                        "linear_labels": ["frontend"],
+                    },
+                ]
+            },
+        )
+
+        assert [entry["source"] for entry in plan["repos"]] == [
+            "service_catalog_label",
+            "service_catalog_label",
+        ]
+        assert [entry["repo"] for entry in plan["repos"]] == [
+            {"owner": "clinikk", "name": "subscription-service"},
+            {"owner": "clinikk", "name": "frontend-app"},
+        ]
+
+    def test_service_catalog_text_infers_repos_from_aliases(self) -> None:
+        plan = build_linear_repo_plan(
+            comment_body="@openswe implement the OLA membership card flow",
+            issue={
+                "title": "OLA member activation should show e-card",
+                "description": "Touch the member portal after subscription activation.",
+                "labels": {"nodes": []},
+            },
+            fallback_repo={"owner": "clinikk", "name": "backend"},
+            default_owner="clinikk",
+            service_catalog={
+                "repos": [
+                    {
+                        "repo": "clinikk/subscription-service",
+                        "aliases": ["subscription activation", "ola", "membership card"],
+                    },
+                    {
+                        "repo": "clinikk/member-portal",
+                        "aliases": ["member portal"],
+                    },
+                ]
+            },
+        )
+
+        assert [entry["source"] for entry in plan["repos"]] == [
+            "service_catalog_text",
+            "service_catalog_text",
+        ]
+        assert [entry["repo"]["name"] for entry in plan["repos"]] == [
+            "subscription-service",
+            "member-portal",
+        ]
+
+    def test_service_catalog_group_expands_to_multiple_repos(self) -> None:
+        plan = build_linear_repo_plan(
+            comment_body="@openswe implement OLA onboarding",
+            issue={"title": "OLA onboarding", "labels": {"nodes": []}},
+            fallback_repo={"owner": "clinikk", "name": "backend"},
+            default_owner="clinikk",
+            service_catalog={
+                "groups": [
+                    {
+                        "name": "ola",
+                        "aliases": ["ola onboarding"],
+                        "repos": [
+                            "clinikk/subscription-service",
+                            {"owner": "clinikk", "name": "business-portal"},
+                        ],
+                    }
+                ]
+            },
+        )
+
+        assert plan["mode"] == "multi_repo"
+        assert [entry["source"] for entry in plan["repos"]] == [
+            "service_catalog_group",
+            "service_catalog_group",
+        ]
+        assert [entry["repo"]["name"] for entry in plan["repos"]] == [
+            "subscription-service",
+            "business-portal",
+        ]
+
+    def test_falls_back_to_team_repo_when_no_signals(self) -> None:
+        plan = build_linear_repo_plan(
+            comment_body="@openswe implement",
+            issue={"title": "Fix thing"},
+            fallback_repo={"owner": "clinikk", "name": "subscription-service"},
+            default_owner="clinikk",
+            label_repo_mapping={},
+        )
+
+        assert plan["mode"] == "single_repo"
+        assert plan["repos"] == [
+            {
+                "repo": {"owner": "clinikk", "name": "subscription-service"},
+                "source": "fallback",
+                "reason": "team/project/default mapping",
+                "execution_order": 0,
+            }
+        ]
 
 
 class TestLinearWebhookRepoOverride:
@@ -157,3 +347,70 @@ class TestLinearWebhookRepoOverride:
             call_args = bg_tasks.add_task.call_args
             repo_config = call_args[0][2]
             assert repo_config == {"owner": "langchain-ai", "name": "open-swe"}
+
+    @pytest.mark.asyncio
+    async def test_uses_service_catalog_for_linear_repo_plan(self) -> None:
+        from agent.webapp import linear_webhook
+
+        payload = {
+            "type": "Comment",
+            "action": "create",
+            "data": {
+                "id": "comment-123",
+                "body": "@openswe please implement the OLA membership card flow",
+                "issue": {
+                    "id": "issue-456",
+                    "title": "Test issue",
+                },
+                "user": {"id": "user-1", "name": "Test User", "email": "test@test.com"},
+            },
+        }
+
+        with (
+            patch("agent.webapp.verify_linear_signature", return_value=True),
+            patch(
+                "agent.webapp.fetch_linear_issue_details",
+                new_callable=AsyncMock,
+                return_value={
+                    "id": "issue-456",
+                    "title": "OLA member activation",
+                    "identifier": "TEST-1",
+                    "url": "https://linear.app/test/issue/TEST-1",
+                    "team": {"id": "t1", "name": "Open SWE", "key": "OS"},
+                    "project": None,
+                    "description": "Make the member portal show card state.",
+                    "labels": {"nodes": []},
+                    "comments": {"nodes": []},
+                },
+            ),
+            patch(
+                "agent.webapp.get_service_catalog",
+                return_value={
+                    "repos": [
+                        {
+                            "repo": "clinikk/subscription-service",
+                            "aliases": ["ola", "membership card"],
+                        },
+                        {
+                            "repo": "clinikk/member-portal",
+                            "aliases": ["member portal"],
+                        },
+                    ]
+                },
+            ),
+            patch("agent.webapp._is_repo_allowed", return_value=True),
+        ):
+            mock_request = AsyncMock()
+            mock_request.body.return_value = json.dumps(payload).encode()
+            mock_request.headers = {"Linear-Signature": "valid"}
+
+            bg_tasks = AsyncMock()
+            result = await linear_webhook(mock_request, bg_tasks)
+
+            assert result["status"] == "accepted"
+            assert "2 repo(s)" in result["message"]
+            repo_configs = [call.args[2] for call in bg_tasks.add_task.call_args_list]
+            assert repo_configs == [
+                {"owner": "clinikk", "name": "subscription-service"},
+                {"owner": "clinikk", "name": "member-portal"},
+            ]

@@ -44,6 +44,70 @@ def test_enqueue_linear_issue_job_persists_job_and_queues_id(monkeypatch, tmp_pa
     assert payload["kind"] == "linear_issue"
     assert payload["issue"]["id"] == "issue-1"
     assert payload["repo_config"] == {"owner": "clinikk", "name": "subscription-service"}
+    assert payload["repo_configs"] == [{"owner": "clinikk", "name": "subscription-service"}]
+
+
+def test_enqueue_linear_issue_job_persists_multi_repo_plan(monkeypatch, tmp_path) -> None:
+    from agent import webapp
+
+    database_url = f"sqlite+aiosqlite:///{tmp_path}/jobs.db"
+    monkeypatch.setenv("OPEN_SWE_DATABASE_URL", database_url)
+    monkeypatch.setenv("OPEN_SWE_REDIS_URL", "redis://localhost:6379/0")
+
+    asyncio.run(_init_database(database_url))
+
+    enqueued_job_ids: list[int] = []
+
+    class FakeQueue:
+        async def enqueue_job(self, job_id: int) -> str:
+            enqueued_job_ids.append(job_id)
+            return "1-0"
+
+    repo_plan = {
+        "mode": "multi_repo",
+        "repos": [
+            {
+                "repo": {"owner": "clinikk", "name": "subscription-service"},
+                "source": "explicit",
+                "reason": "mentioned in Linear context",
+                "execution_order": 0,
+            },
+            {
+                "repo": {"owner": "clinikk", "name": "frontend-app"},
+                "source": "linear_label",
+                "reason": "Linear label frontend-app",
+                "execution_order": 1,
+            },
+        ],
+    }
+
+    monkeypatch.setattr(webapp, "create_job_queue", lambda: FakeQueue())
+
+    job = asyncio.run(
+        webapp.enqueue_linear_issue_job(
+            {
+                "id": "issue-1",
+                "identifier": "CLI-1",
+                "title": "Multi repo change",
+                "triggering_comment_id": "comment-1",
+            },
+            {"owner": "clinikk", "name": "subscription-service"},
+            repo_plan=repo_plan,
+        )
+    )
+
+    assert enqueued_job_ids == [job.id]
+    assert job.repo_plan_json is not None
+    assert job.linear_issue_id == "issue-1"
+    assert job.linear_issue_identifier == "CLI-1"
+
+    payload = json.loads(job.payload_json or "{}")
+    assert payload["kind"] == "linear_issue"
+    assert payload["repo_configs"] == [
+        {"owner": "clinikk", "name": "subscription-service"},
+        {"owner": "clinikk", "name": "frontend-app"},
+    ]
+    assert payload["repo_plan"] == repo_plan
 
 
 def test_worker_processes_linear_issue_job(monkeypatch, tmp_path) -> None:
@@ -77,6 +141,39 @@ def test_worker_processes_linear_issue_job(monkeypatch, tmp_path) -> None:
     assert job.runs[0].status == "succeeded"
 
 
+def test_worker_processes_multi_repo_linear_issue_job(monkeypatch, tmp_path) -> None:
+    from agent import worker
+
+    database_url = f"sqlite+aiosqlite:///{tmp_path}/jobs.db"
+    monkeypatch.setenv("OPEN_SWE_DATABASE_URL", database_url)
+
+    job_id = asyncio.run(_seed_multi_repo_linear_issue_job(database_url))
+    processed: list[tuple[dict, dict]] = []
+
+    async def fake_process_linear_issue(issue: dict, repo_config: dict) -> None:
+        processed.append((dict(issue), dict(repo_config)))
+
+    monkeypatch.setattr(worker.webapp, "process_linear_issue", fake_process_linear_issue)
+
+    asyncio.run(worker.process_durable_job(job_id, worker_id="worker-1"))
+
+    assert [repo for _issue, repo in processed] == [
+        {"owner": "clinikk", "name": "subscription-service"},
+        {"owner": "clinikk", "name": "frontend-app"},
+    ]
+    assert processed[0][0]["multi_repo"] is True
+    assert processed[0][0]["repo_index"] == 0
+    assert processed[1][0]["repo_index"] == 1
+
+    job = asyncio.run(_load_job(database_url, job_id))
+    assert job is not None
+    assert job.status == "succeeded"
+    assert len(job.runs) == 2
+    assert [run.repo_name for run in job.runs] == ["subscription-service", "frontend-app"]
+    assert [run.execution_order for run in job.runs] == [0, 1]
+    assert {run.status for run in job.runs} == {"succeeded"}
+
+
 async def _init_database(database_url: str) -> None:
     from agent.storage.database import create_async_engine_from_url, init_models
 
@@ -105,6 +202,57 @@ async def _seed_linear_issue_job(database_url: str) -> int:
                     "kind": "linear_issue",
                     "issue": {"id": "issue-1", "title": "Move notification hook"},
                     "repo_config": {"owner": "clinikk", "name": "subscription-service"},
+                }
+            ),
+        )
+    await engine.dispose()
+    return job.id
+
+
+async def _seed_multi_repo_linear_issue_job(database_url: str) -> int:
+    from agent.storage.database import create_async_engine_from_url, init_models, sessionmaker_for
+    from agent.storage.jobs import create_job
+
+    repo_plan = {
+        "mode": "multi_repo",
+        "repos": [
+            {
+                "repo": {"owner": "clinikk", "name": "subscription-service"},
+                "source": "explicit",
+                "reason": "mentioned in Linear context",
+                "execution_order": 0,
+            },
+            {
+                "repo": {"owner": "clinikk", "name": "frontend-app"},
+                "source": "linear_label",
+                "reason": "Linear label frontend-app",
+                "execution_order": 1,
+            },
+        ],
+    }
+
+    engine = create_async_engine_from_url(database_url)
+    await init_models(engine)
+    sessionmaker = sessionmaker_for(engine)
+    async with sessionmaker() as session:
+        job = await create_job(
+            session,
+            source="linear",
+            source_id="issue-1/comment-1",
+            repo_owner="clinikk",
+            repo_name="subscription-service",
+            task_text="Multi repo change",
+            repo_plan_json=json.dumps(repo_plan),
+            payload_json=json.dumps(
+                {
+                    "kind": "linear_issue",
+                    "issue": {"id": "issue-1", "title": "Multi repo change"},
+                    "repo_config": {"owner": "clinikk", "name": "subscription-service"},
+                    "repo_configs": [
+                        {"owner": "clinikk", "name": "subscription-service"},
+                        {"owner": "clinikk", "name": "frontend-app"},
+                    ],
+                    "repo_plan": repo_plan,
                 }
             ),
         )

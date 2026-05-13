@@ -50,7 +50,10 @@ async def test_create_and_update_job_state(db_session) -> None:
         repo_name="subscription-service",
         task_text="Move Slack notification hook",
         payload_json='{"kind": "linear_issue"}',
+        repo_plan_json='{"mode": "multi_repo", "repos": []}',
         created_by="ravi@example.com",
+        linear_issue_id="issue-1",
+        linear_issue_identifier="CLI-1332",
         target_pr_number=119,
         base_sha="base-sha",
         head_sha_at_start="head-sha",
@@ -59,6 +62,9 @@ async def test_create_and_update_job_state(db_session) -> None:
     assert job.status == "queued"
     assert job.target_pr_number == 119
     assert job.payload_json == '{"kind": "linear_issue"}'
+    assert job.repo_plan_json == '{"mode": "multi_repo", "repos": []}'
+    assert job.linear_issue_id == "issue-1"
+    assert job.linear_issue_identifier == "CLI-1332"
 
     running = await update_job_status(db_session, job.id, "running")
     assert running.status == "running"
@@ -92,6 +98,10 @@ async def test_create_job_run_attaches_execution_metadata(db_session) -> None:
         db_session,
         job_id=job.id,
         worker_id="worker-1",
+        repo_owner="clinikk",
+        repo_name="subscription-service",
+        execution_order=0,
+        depends_on_run_ids="[1]",
         worktree_path="/workspace/open-swe/worktrees/run-1/subscription-service",
         branch_name="open-swe/subscription-service-run-1",
         status="running",
@@ -101,6 +111,7 @@ async def test_create_job_run_attaches_execution_metadata(db_session) -> None:
         diff_head_sha="head-sha",
         patch_path="/workspace/open-swe/logs/run-1.patch",
         log_path="/workspace/open-swe/logs/run-1.log",
+        summary="Implemented backend change",
     )
 
     assert run.job_id == job.id
@@ -111,3 +122,8 @@ async def test_create_job_run_attaches_execution_metadata(db_session) -> None:
     assert fetched.id == job.id
     assert len(fetched.runs) == 1
     assert fetched.runs[0].branch_name == "open-swe/subscription-service-run-1"
+    assert fetched.runs[0].repo_owner == "clinikk"
+    assert fetched.runs[0].repo_name == "subscription-service"
+    assert fetched.runs[0].execution_order == 0
+    assert fetched.runs[0].depends_on_run_ids == "[1]"
+    assert fetched.runs[0].summary == "Implemented backend change"

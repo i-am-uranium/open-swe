@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from agent.utils.repo import extract_repo_from_text
+from agent.utils.repo import (
+    build_linear_repo_plan,
+    extract_repo_from_text,
+    extract_repos_from_text,
+)
 
 
 class TestExtractRepoFromText:
@@ -52,6 +56,90 @@ class TestExtractRepoFromText:
     def test_trailing_slash_stripped(self) -> None:
         result = extract_repo_from_text("repo:my-org/my-repo/")
         assert result == {"owner": "my-org", "name": "my-repo"}
+
+    def test_extract_multiple_repos_from_text(self) -> None:
+        result = extract_repos_from_text(
+            "touch repo:clinikk/subscription-service and "
+            "https://github.com/clinikk/frontend-app plus repo infrastructure",
+            default_owner="clinikk",
+        )
+
+        assert result == [
+            {"owner": "clinikk", "name": "subscription-service"},
+            {"owner": "clinikk", "name": "infrastructure"},
+            {"owner": "clinikk", "name": "frontend-app"},
+        ]
+
+    def test_extract_multiple_repos_dedupes_stably(self) -> None:
+        result = extract_repos_from_text(
+            "repo:clinikk/subscription-service "
+            "https://github.com/clinikk/subscription-service/pull/120",
+            default_owner="clinikk",
+        )
+
+        assert result == [{"owner": "clinikk", "name": "subscription-service"}]
+
+
+class TestBuildLinearRepoPlan:
+    def test_explicit_repos_beat_fallback(self) -> None:
+        plan = build_linear_repo_plan(
+            comment_body="@openswe fix repo:clinikk/subscription-service repo:clinikk/frontend-app",
+            issue={"title": "Fix checkout"},
+            fallback_repo={"owner": "clinikk", "name": "backend"},
+            default_owner="clinikk",
+            label_repo_mapping={},
+        )
+
+        assert [entry["repo"] for entry in plan["repos"]] == [
+            {"owner": "clinikk", "name": "subscription-service"},
+            {"owner": "clinikk", "name": "frontend-app"},
+        ]
+        assert plan["mode"] == "multi_repo"
+
+    def test_linear_labels_add_repos(self) -> None:
+        plan = build_linear_repo_plan(
+            comment_body="@openswe implement",
+            issue={
+                "title": "Update dashboard",
+                "labels": {
+                    "nodes": [
+                        {"name": "subscription-service"},
+                        {"name": "frontend-app"},
+                    ]
+                },
+            },
+            fallback_repo={"owner": "clinikk", "name": "backend"},
+            default_owner="clinikk",
+            label_repo_mapping={
+                "subscription-service": {"owner": "clinikk", "name": "subscription-service"},
+                "frontend-app": {"owner": "clinikk", "name": "frontend-app"},
+            },
+        )
+
+        assert [entry["source"] for entry in plan["repos"]] == ["linear_label", "linear_label"]
+        assert [entry["repo"]["name"] for entry in plan["repos"]] == [
+            "subscription-service",
+            "frontend-app",
+        ]
+
+    def test_falls_back_to_team_repo_when_no_signals(self) -> None:
+        plan = build_linear_repo_plan(
+            comment_body="@openswe implement",
+            issue={"title": "Fix thing"},
+            fallback_repo={"owner": "clinikk", "name": "subscription-service"},
+            default_owner="clinikk",
+            label_repo_mapping={},
+        )
+
+        assert plan["mode"] == "single_repo"
+        assert plan["repos"] == [
+            {
+                "repo": {"owner": "clinikk", "name": "subscription-service"},
+                "source": "fallback",
+                "reason": "team/project/default mapping",
+                "execution_order": 0,
+            }
+        ]
 
 
 class TestLinearWebhookRepoOverride:

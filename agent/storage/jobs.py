@@ -24,6 +24,10 @@ async def create_job(
     base_sha: str | None = None,
     head_sha_at_start: str | None = None,
     payload_json: str | None = None,
+    repo_plan_json: str | None = None,
+    coordination_status: str | None = None,
+    linear_issue_id: str | None = None,
+    linear_issue_identifier: str | None = None,
     priority: int = 0,
     created_by: str | None = None,
 ) -> Job:
@@ -38,6 +42,10 @@ async def create_job(
         head_sha_at_start=head_sha_at_start,
         task_text=task_text,
         payload_json=payload_json,
+        repo_plan_json=repo_plan_json,
+        coordination_status=coordination_status,
+        linear_issue_id=linear_issue_id,
+        linear_issue_identifier=linear_issue_identifier,
         priority=priority,
         created_by=created_by,
         status="queued",
@@ -104,6 +112,10 @@ async def create_job_run(
     job_id: int,
     status: str = "queued",
     worker_id: str | None = None,
+    repo_owner: str | None = None,
+    repo_name: str | None = None,
+    execution_order: int = 0,
+    depends_on_run_ids: str | None = None,
     worktree_path: str | None = None,
     branch_name: str | None = None,
     commit_sha: str | None = None,
@@ -112,11 +124,17 @@ async def create_job_run(
     diff_head_sha: str | None = None,
     patch_path: str | None = None,
     log_path: str | None = None,
+    summary: str | None = None,
+    error_summary: str | None = None,
 ) -> JobRun:
     now = utc_now()
     run = JobRun(
         job_id=job_id,
         worker_id=worker_id,
+        repo_owner=repo_owner,
+        repo_name=repo_name,
+        execution_order=execution_order,
+        depends_on_run_ids=depends_on_run_ids,
         worktree_path=worktree_path,
         branch_name=branch_name,
         commit_sha=commit_sha,
@@ -127,6 +145,8 @@ async def create_job_run(
         status=status,
         started_at=now if status == "running" else None,
         log_path=log_path,
+        summary=summary,
+        error_summary=error_summary,
     )
     session.add(run)
     await session.commit()
@@ -138,6 +158,9 @@ async def update_job_run_status(
     session: AsyncSession,
     run_id: int,
     status: str,
+    *,
+    error_summary: str | None = None,
+    summary: str | None = None,
 ) -> JobRun:
     run = await session.get(JobRun, run_id)
     if run is None:
@@ -146,6 +169,10 @@ async def update_job_run_status(
     run.status = status
     if status in TERMINAL_JOB_STATUSES:
         run.finished_at = utc_now()
+    if error_summary is not None:
+        run.error_summary = error_summary
+    if summary is not None:
+        run.summary = summary
 
     await session.commit()
     await session.refresh(run)

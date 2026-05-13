@@ -28,3 +28,16 @@ def test_job_payload_migration_adds_payload_column() -> None:
     assert "SET search_path TO open_swe" in sql
     assert "ALTER TABLE jobs" in sql
     assert "ADD COLUMN IF NOT EXISTS payload_json TEXT" in sql
+
+
+def test_multi_repo_migration_adds_repo_plan_columns() -> None:
+    migration = Path("migrations/0003_multi_repo_linear_jobs.sql")
+
+    assert migration.exists()
+    sql = migration.read_text()
+
+    assert "ADD COLUMN IF NOT EXISTS repo_plan_json" in sql
+    assert "ADD COLUMN IF NOT EXISTS linear_issue_id" in sql
+    assert "ADD COLUMN IF NOT EXISTS repo_owner" in sql
+    assert "ADD COLUMN IF NOT EXISTS repo_name" in sql
+    assert "ADD COLUMN IF NOT EXISTS execution_order" in sql
